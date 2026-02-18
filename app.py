@@ -14,7 +14,7 @@ from config import TEAM_MEMBERS
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Voice Memo Logger",
+    page_title="Pied Piper",
     page_icon="🎙",
     layout="wide",
     initial_sidebar_state="expanded",
