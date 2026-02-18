@@ -57,10 +57,13 @@ def _load_records(eng, sev, search, d_from, d_to):
     )
 
 
-@st.cache_resource(show_spinner=False)
-def _db_ping():
-    from db_logger import test_connection
-    return test_connection()
+@st.cache_data(ttl=30, show_spinner=False)
+def _db_ping() -> bool:
+    try:
+        from db_logger import test_connection
+        return test_connection() == "ok"
+    except Exception:
+        return False
 
 
 def _clear_entry():
@@ -151,7 +154,7 @@ with st.sidebar:
     engineer = st.selectbox("👤  Engineer", TEAM_MEMBERS)
 
     st.divider()
-    db_ok = _db_ping() == "ok"
+    db_ok = _db_ping()
     if db_ok:
         st.success("DB connected", icon="🟢")
     else:
