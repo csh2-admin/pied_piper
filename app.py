@@ -14,7 +14,7 @@ from config import TEAM_MEMBERS
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Pied Piper",
+    page_title="Voice Memo Logger",
     page_icon="🎙",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -25,6 +25,13 @@ SEV_BADGE = {
     "Medium":   "🟡", "Low":  "🟢", "None": "⚪",
 }
 SEVERITY_OPTIONS = ["Critical", "High", "Medium", "Low", "None"]
+ACTIVITY_OPTIONS = [
+    "Regular Maintenance",
+    "Unplanned Maintenance",
+    "Technical Milestone",
+    "Logistics",
+    "Other",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,14 +53,15 @@ for k, v in {
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60, show_spinner="Loading records…")
-def _load_records(eng, sev, search, d_from, d_to):
+def _load_records(eng, act, sev, search, d_from, d_to):
     from db_logger import fetch_filtered_rows
     return fetch_filtered_rows(
-        engineer  = "" if eng == "All engineers"   else eng,
-        severity  = "" if sev == "All severities"  else sev,
-        search    = search or "",
-        date_from = str(d_from) if d_from else "",
-        date_to   = str(d_to)   if d_to   else "",
+        engineer      = "" if eng == "All engineers"  else eng,
+        activity_type = "" if act == "All types"      else act,
+        severity      = "" if sev == "All severities" else sev,
+        search        = search or "",
+        date_from     = str(d_from) if d_from else "",
+        date_to       = str(d_to)   if d_to   else "",
     )
 
 
@@ -88,6 +96,9 @@ def _edit_row(row: dict):
             cur_eng = row.get("engineer", "") or ""
             eng_idx = TEAM_MEMBERS.index(cur_eng) if cur_eng in TEAM_MEMBERS else 0
             f_eng   = st.selectbox("Engineer", TEAM_MEMBERS, index=eng_idx)
+            cur_act2 = row.get("activity_type","Other") or "Other"
+            act_idx2 = ACTIVITY_OPTIONS.index(cur_act2) if cur_act2 in ACTIVITY_OPTIONS else 4
+            f_act2  = st.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx2)
             f_sum   = st.text_area("Summary",            value=row.get("summary","") or "",            height=75)
             f_sp    = st.text_area("System Performance", value=row.get("system_performance","") or "", height=75)
             f_md    = st.text_area("Maintenance Done",   value=row.get("maintenance_done","") or "",   height=75)
@@ -112,7 +123,7 @@ def _edit_row(row: dict):
         try:
             from db_logger import update_entry
             update_entry(row_id, {
-                "engineer": f_eng, "summary": f_sum,
+                "engineer": f_eng, "activity_type": f_act2, "summary": f_sum,
                 "system_performance": f_sp, "maintenance_done": f_md,
                 "issues_found": f_if, "action_items": f_ai,
                 "components_affected": f_ca, "duration_hours": f_dur,
@@ -140,7 +151,7 @@ def _edit_row(row: dict):
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🎙 Pied Piper")
+    st.title("🎙 Voice Memo Logger")
     st.caption("Hardware Test — Daily Log")
     st.divider()
 
@@ -243,68 +254,95 @@ if "New Entry" in page:
                     st.error(f"Extraction error: {e}")
 
         if st.session_state.insights:
-            ins = st.session_state.insights
-            sev = ins.get("severity","None") or "None"
-            badge = SEV_BADGE.get(sev,"⚪")
+            st.success("Extraction complete — review and edit fields below before saving.")
 
-            # Summary + severity header
-            hc1, hc2 = st.columns([4, 1])
-            hc1.markdown(f"**Summary:** {ins.get('summary','—')}")
-            hc2.markdown(f"**Severity:** {badge} {sev}")
-            st.divider()
-
-            # Field grid
-            gc1, gc2 = st.columns(2)
-            for label, key, col in [
-                ("System Performance",  "system_performance",  gc1),
-                ("Maintenance Done",    "maintenance_done",    gc1),
-                ("Issues Found",        "issues_found",        gc1),
-                ("Action Items",        "action_items",        gc2),
-                ("Components Affected", "components_affected", gc2),
-                ("Duration (hrs)",      "duration_hours",      gc2),
-            ]:
-                v = ins.get(key,"")
-                if v:
-                    col.markdown(f"**{label}**")
-                    col.write(v)
-
-            if ins.get("additional_notes"):
-                st.markdown("**Additional Notes**")
-                st.write(ins["additional_notes"])
-
-    # ── Step 4: Save ──────────────────────────────────────────────────────────
+    # ── Step 4: Review, Edit & Save ───────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Step 4 — Save to Database")
+        st.subheader("Step 4 — Review, Edit & Save")
 
-        bc1, bc2 = st.columns([1, 1])
-        do_save  = bc1.button("💾  Save to Database",
-                              disabled=not st.session_state.insights,
-                              type="primary", use_container_width=True)
-        do_clear = bc2.button("🗑  Clear all",
-                              use_container_width=True)
+        if not st.session_state.insights:
+            st.caption("Extract insights first to unlock this section.")
+        else:
+            ins = st.session_state.insights
 
-        if do_save:
-            with st.spinner("Saving…"):
-                try:
-                    from db_logger import append_entry, ensure_schema
-                    ensure_schema()
-                    result = append_entry(
-                        st.session_state.insights,
-                        st.session_state.transcript,
-                        st.session_state.source_label or "Unknown",
-                        engineer,
-                    )
-                    ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
-                    st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}")
-                    _clear_entry()
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Database error: {e}")
+            # ── Editable fields form ──────────────────────────────────────────
+            with st.form("edit_insights_form"):
+                st.markdown("##### Review extracted fields — edit anything before saving")
 
-        if do_clear:
-            _clear_entry()
-            st.rerun()
+                # Row 1: Activity type + Severity side by side (dropdowns)
+                r1c1, r1c2 = st.columns(2)
+                cur_act = ins.get("activity_type","Other") or "Other"
+                act_idx = ACTIVITY_OPTIONS.index(cur_act) if cur_act in ACTIVITY_OPTIONS else 4
+                f_activity = r1c1.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx)
+
+                cur_sev = ins.get("severity","None") or "None"
+                sev_idx = SEVERITY_OPTIONS.index(cur_sev) if cur_sev in SEVERITY_OPTIONS else 4
+                f_severity = r1c2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_idx)
+
+                # Summary — full width
+                f_summary = st.text_area("Summary",
+                    value=ins.get("summary","") or "", height=75)
+
+                # Row 2: two-column text areas
+                c1, c2 = st.columns(2)
+                f_sp   = c1.text_area("System Performance",
+                    value=ins.get("system_performance","") or "", height=100)
+                f_md   = c1.text_area("Maintenance Done",
+                    value=ins.get("maintenance_done","") or "", height=100)
+                f_if   = c1.text_area("Issues Found",
+                    value=ins.get("issues_found","") or "", height=100)
+                f_ai   = c2.text_area("Action Items",
+                    value=ins.get("action_items","") or "", height=100)
+                f_ca   = c2.text_input("Components Affected",
+                    value=ins.get("components_affected","") or "")
+                f_dur  = c2.text_input("Duration (hrs)",
+                    value=str(ins.get("duration_hours","") or ""))
+                f_an   = st.text_area("Additional Notes",
+                    value=ins.get("additional_notes","") or "", height=75)
+
+                st.divider()
+                sc1, sc2 = st.columns([1, 1])
+                do_save  = sc1.form_submit_button("💾  Save to Database",
+                                                  type="primary",
+                                                  use_container_width=True)
+                do_clear = sc2.form_submit_button("🗑  Clear all",
+                                                  use_container_width=True)
+
+            if do_save:
+                # Write edited values back to session state before saving
+                edited = {
+                    "activity_type":       f_activity,
+                    "summary":             f_summary,
+                    "system_performance":  f_sp,
+                    "maintenance_done":    f_md,
+                    "issues_found":        f_if,
+                    "action_items":        f_ai,
+                    "components_affected": f_ca,
+                    "duration_hours":      f_dur,
+                    "severity":            f_severity,
+                    "additional_notes":    f_an,
+                }
+                with st.spinner("Saving…"):
+                    try:
+                        from db_logger import append_entry, ensure_schema
+                        ensure_schema()
+                        result = append_entry(
+                            edited,
+                            st.session_state.transcript,
+                            st.session_state.source_label or "Unknown",
+                            engineer,
+                        )
+                        ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+                        st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}")
+                        _clear_entry()
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Database error: {e}")
+
+            if do_clear:
+                _clear_entry()
+                st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,11 +354,12 @@ else:
     # ── Filters ───────────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("Filters")
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2, fc3, fc4 = st.columns(4)
         f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS)
-        f_sev  = fc2.selectbox("Severity",  ["All severities"] + SEVERITY_OPTIONS)
-        f_srch = fc3.text_input("Keyword search",
-                                placeholder="summary, issues, components, transcript…")
+        f_act  = fc2.selectbox("Activity Type", ["All types"] + ACTIVITY_OPTIONS)
+        f_sev  = fc3.selectbox("Severity",  ["All severities"] + SEVERITY_OPTIONS)
+        f_srch = fc4.text_input("Keyword search",
+                                placeholder="summary, issues, components…")
 
         fd1, fd2, fd3 = st.columns(3)
         f_from = fd1.date_input("From", value=None)
@@ -340,7 +379,7 @@ else:
 
     # ── Fetch ─────────────────────────────────────────────────────────────────
     try:
-        rows = _load_records(f_eng, f_sev, f_srch, f_from, f_to)
+        rows = _load_records(f_eng, f_act, f_sev, f_srch, f_from, f_to)
     except Exception as e:
         st.error(f"Could not load records: {e}")
         rows = []
@@ -379,7 +418,8 @@ else:
             badge = SEV_BADGE.get(sev,"⚪")
             summary_preview = (row.get("summary") or "")[:90]
 
+            act_label = row.get("activity_type","") or ""
             with st.expander(
-                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {summary_preview}"
+                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}  ·  {summary_preview}"
             ):
                 _edit_row(row)

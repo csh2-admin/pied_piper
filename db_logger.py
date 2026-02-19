@@ -60,13 +60,13 @@ $$;
 
 INSERT_SQL = """
 INSERT INTO memo_log (
-    engineer, source_file,
+    engineer, source_file, activity_type,
     summary, system_performance, maintenance_done,
     issues_found, action_items, components_affected,
     duration_hours, severity, additional_notes,
     raw_transcript, raw_insights_json
 ) VALUES (
-    %(engineer)s, %(source_file)s,
+    %(engineer)s, %(source_file)s, %(activity_type)s,
     %(summary)s, %(system_performance)s, %(maintenance_done)s,
     %(issues_found)s, %(action_items)s, %(components_affected)s,
     %(duration_hours)s, %(severity)s, %(additional_notes)s,
@@ -78,6 +78,7 @@ RETURNING id, logged_at;
 UPDATE_SQL = """
 UPDATE memo_log SET
     engineer            = %(engineer)s,
+    activity_type       = %(activity_type)s,
     summary             = %(summary)s,
     system_performance  = %(system_performance)s,
     maintenance_done    = %(maintenance_done)s,
@@ -94,7 +95,7 @@ RETURNING id, logged_at;
 
 FETCH_ALL_SQL = """
 SELECT
-    id, logged_at, engineer, source_file,
+    id, logged_at, engineer, source_file, activity_type,
     summary, system_performance, maintenance_done,
     issues_found, action_items, components_affected,
     duration_hours, severity, additional_notes, raw_transcript
@@ -104,14 +105,15 @@ ORDER BY logged_at DESC;
 
 FETCH_FILTERED_SQL = """
 SELECT
-    id, logged_at, engineer, source_file,
+    id, logged_at, engineer, source_file, activity_type,
     summary, system_performance, maintenance_done,
     issues_found, action_items, components_affected,
     duration_hours, severity, additional_notes, raw_transcript
 FROM memo_log
 WHERE
-    (%(engineer)s   = '' OR engineer = %(engineer)s)
-    AND (%(severity)s   = '' OR severity = %(severity)s)
+    (%(engineer)s      = '' OR engineer      = %(engineer)s)
+    AND (%(activity_type)s = '' OR activity_type = %(activity_type)s)
+    AND (%(severity)s   = '' OR severity   = %(severity)s)
     AND (%(search)s     = '' OR
          summary             ILIKE %(search_like)s OR
          issues_found        ILIKE %(search_like)s OR
@@ -177,6 +179,7 @@ def append_entry(insights: dict, raw_transcript: str,
     row = {
         "engineer":            engineer,
         "source_file":         source_file,
+        "activity_type":       insights.get("activity_type", ""),
         "summary":             insights.get("summary", ""),
         "system_performance":  insights.get("system_performance", ""),
         "maintenance_done":    insights.get("maintenance_done", ""),
@@ -208,6 +211,7 @@ def update_entry(row_id: int, fields: dict) -> dict:
     params = {
         "id":                  row_id,
         "engineer":            fields.get("engineer", ""),
+        "activity_type":       fields.get("activity_type", ""),
         "summary":             fields.get("summary", ""),
         "system_performance":  fields.get("system_performance", ""),
         "maintenance_done":    fields.get("maintenance_done", ""),
@@ -252,15 +256,16 @@ def fetch_all_rows() -> list[dict]:
         conn.close()
 
 
-def fetch_filtered_rows(engineer="", severity="", search="",
-                        date_from="", date_to="") -> list[dict]:
+def fetch_filtered_rows(engineer="", activity_type="", severity="",
+                        search="", date_from="", date_to="") -> list[dict]:
     params = {
-        "engineer":    engineer,
-        "severity":    severity,
-        "search":      search,
-        "search_like": f"%{search}%",
-        "date_from":   date_from,
-        "date_to":     date_to,
+        "engineer":      engineer,
+        "activity_type": activity_type,
+        "severity":      severity,
+        "search":        search,
+        "search_like":   f"%{search}%",
+        "date_from":     date_from,
+        "date_to":       date_to,
     }
     conn = _connect()
     try:

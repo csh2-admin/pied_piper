@@ -14,6 +14,7 @@ COLUMNS = [
     ("Timestamp (UTC)",      "logged_at",            22),
     ("Engineer",             "engineer",             16),
     ("Source File",          "source_file",          28),
+    ("Activity Type",        "activity_type",        22),
     ("Summary",              "summary",              45),
     ("System Performance",   "system_performance",   45),
     ("Maintenance Done",     "maintenance_done",     45),

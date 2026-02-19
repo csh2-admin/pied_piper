@@ -8,6 +8,14 @@ from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, PRODUCT_DESCRIPTION
 
 _client = None
 
+ACTIVITY_OPTIONS = [
+    "Regular Maintenance",
+    "Unplanned Maintenance",
+    "Technical Milestone",
+    "Logistics",
+    "Other",
+]
+
 
 def _get_client():
     global _client
@@ -23,6 +31,7 @@ Your job is to extract structured information from the transcript and return ONL
 Return a JSON object with exactly these keys (use empty string "" if a field is not mentioned):
 
 {{
+  "activity_type":     "Classify the primary activity: Regular Maintenance | Unplanned Maintenance | Technical Milestone | Logistics | Other",
   "summary":             "1-2 sentence plain-English summary of the entry",
   "system_performance":  "Any observations about how the system/hardware performed (metrics, behaviour, anomalies, sensor readings, etc.)",
   "maintenance_done":    "Maintenance or repair activities completed today",
@@ -34,31 +43,28 @@ Return a JSON object with exactly these keys (use empty string "" if a field is 
   "additional_notes":    "Any other relevant details not captured above"
 }}
 
+For activity_type, use these definitions:
+- Regular Maintenance: Scheduled, routine upkeep or inspection
+- Unplanned Maintenance: Unexpected repairs or emergency interventions
+- Technical Milestone: A notable achievement, test completion, or system qualification event
+- Logistics: Transport, procurement, setup, teardown, or coordination activities
+- Other: Anything that doesn't fit the above
+
 Return ONLY the JSON object. No markdown, no commentary."""
 
 
 def extract_insights(transcript: str) -> dict:
-    """
-    Send the transcript to Claude and return a dict of structured fields.
-    """
     client = _get_client()
-    print("[Claude] Extracting insights from transcript…")
 
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Transcript:\n\n{transcript}",
-            }
-        ],
+        messages=[{"role": "user", "content": f"Transcript:\n\n{transcript}"}],
     )
 
     raw = message.content[0].text.strip()
 
-    # Strip markdown code fences if model adds them
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -67,20 +73,26 @@ def extract_insights(transcript: str) -> dict:
 
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[Claude] Warning: could not parse JSON response — {e}")
-        print(f"[Claude] Raw response:\n{raw}\n")
+    except json.JSONDecodeError:
         data = {
-            "summary": "Parse error — see raw transcript",
-            "system_performance": "",
-            "maintenance_done": "",
-            "issues_found": "",
-            "action_items": "",
+            "activity_type":      "Other",
+            "summary":             "Parse error — see raw transcript",
+            "system_performance":  "",
+            "maintenance_done":    "",
+            "issues_found":        "",
+            "action_items":        "",
             "components_affected": "",
-            "duration_hours": "",
-            "severity": "",
-            "additional_notes": raw,
+            "duration_hours":      "",
+            "severity":            "",
+            "additional_notes":    raw,
         }
 
-    print("[Claude] Extraction complete.")
+    # Normalise activity_type to match our options exactly
+    raw_act = data.get("activity_type", "").strip()
+    matched = next(
+        (o for o in ACTIVITY_OPTIONS if o.lower() == raw_act.lower()),
+        "Other"
+    )
+    data["activity_type"] = matched
+
     return data
