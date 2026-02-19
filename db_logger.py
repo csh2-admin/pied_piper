@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS memo_log (
     severity            TEXT,
     additional_notes    TEXT,
     raw_transcript      TEXT,
-    raw_insights_json   JSONB
+    raw_insights_json   JSONB,
+    PRIMARY KEY (id, logged_at)
 );
 """
 
@@ -127,6 +128,60 @@ LIMIT 500;
 """
 
 DELETE_SQL = "DELETE FROM memo_log WHERE id = %(id)s;"
+# ── Action Items table ────────────────────────────────────────────────────────
+
+CREATE_ACTIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS action_items (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    memo_id     BIGINT,
+    engineer    TEXT,
+    action_text TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'Not Started',
+    notes       TEXT
+);
+"""
+
+INSERT_ACTION_SQL = """
+INSERT INTO action_items (memo_id, engineer, action_text, status)
+VALUES (%(memo_id)s, %(engineer)s, %(action_text)s, 'Not Started')
+RETURNING id, created_at;
+"""
+
+UPDATE_ACTION_STATUS_SQL = """
+UPDATE action_items
+SET status = %(status)s, notes = %(notes)s, updated_at = NOW()
+WHERE id = %(id)s
+RETURNING id, updated_at;
+"""
+
+DELETE_ACTION_SQL = "DELETE FROM action_items WHERE id = %(id)s;"
+
+FETCH_ACTIONS_SQL = """
+SELECT
+    a.id, a.created_at, a.updated_at,
+    a.memo_id, a.engineer, a.action_text, a.status, a.notes,
+    m.logged_at AS memo_logged_at,
+    m.summary   AS memo_summary,
+    m.activity_type AS memo_activity_type
+FROM action_items a
+LEFT JOIN memo_log m ON m.id = a.memo_id
+WHERE
+    (%(engineer)s = '' OR a.engineer = %(engineer)s)
+    AND (%(status)s   = '' OR a.status   = %(status)s)
+    AND (%(search)s   = '' OR a.action_text ILIKE %(search_like)s
+                            OR a.notes      ILIKE %(search_like)s)
+ORDER BY
+    CASE a.status
+        WHEN 'In Progress'  THEN 1
+        WHEN 'Not Started'  THEN 2
+        WHEN 'Complete'     THEN 3
+    END,
+    a.updated_at DESC;
+"""
+
+
 
 FETCH_ENGINEERS_SQL = "SELECT DISTINCT engineer FROM memo_log ORDER BY engineer;"
 
@@ -158,6 +213,7 @@ def ensure_schema():
             with conn.cursor() as cur:
                 cur.execute(CREATE_TABLE_SQL)
                 cur.execute(HYPERTABLE_SQL)
+                cur.execute(CREATE_ACTIONS_TABLE_SQL)
     finally:
         conn.close()
 
@@ -294,3 +350,96 @@ def test_connection() -> str:
         return "ok"
     except Exception as e:
         return str(e)
+
+
+# ── Action Items CRUD ─────────────────────────────────────────────────────────
+
+def parse_action_items(action_text: str) -> list[str]:
+    """
+    Split a multi-line or bullet-separated action_items string into
+    individual action item strings. Filters out empty lines.
+    """
+    import re
+    if not action_text or not action_text.strip():
+        return []
+    lines = re.split(r"[\n;]", action_text)
+    cleaned = []
+    for line in lines:
+        # Strip leading bullet/dash/number markers
+        line = re.sub(r"^\s*[-•*\d\.]+\s*", "", line).strip()
+        if line:
+            cleaned.append(line)
+    return cleaned
+
+
+def create_action_items_from_memo(memo_id, action_text: str,
+                                   engineer: str) -> list[dict]:
+    """
+    Parse action_text and insert one row per action item.
+    Returns list of created rows with id and created_at.
+    """
+    items = parse_action_items(action_text)
+    if not items:
+        return []
+
+    conn = _connect()
+    created = []
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                for text in items:
+                    cur.execute(INSERT_ACTION_SQL, {
+                        "memo_id":     memo_id,
+                        "engineer":    engineer,
+                        "action_text": text,
+                    })
+                    row_id, created_at = cur.fetchone()
+                    created.append({"id": row_id, "created_at": created_at,
+                                    "action_text": text})
+    finally:
+        conn.close()
+    return created
+
+
+def update_action_item(item_id: int, status: str, notes: str = "") -> dict:
+    """Update the status and optional notes of an action item."""
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(UPDATE_ACTION_STATUS_SQL, {
+                    "id":     item_id,
+                    "status": status,
+                    "notes":  notes or "",
+                })
+                row_id, updated_at = cur.fetchone()
+        return {"id": row_id, "updated_at": updated_at}
+    finally:
+        conn.close()
+
+
+def delete_action_item(item_id: int):
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(DELETE_ACTION_SQL, {"id": item_id})
+    finally:
+        conn.close()
+
+
+def fetch_action_items(engineer="", status="", search="") -> list[dict]:
+    """Fetch action items with optional filters."""
+    params = {
+        "engineer":    engineer,
+        "status":      status,
+        "search":      search,
+        "search_like": f"%{search}%",
+    }
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_ACTIONS_SQL, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()

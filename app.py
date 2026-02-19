@@ -25,6 +25,9 @@ SEV_BADGE = {
     "Medium":   "🟡", "Low":  "🟢", "None": "⚪",
 }
 SEVERITY_OPTIONS = ["Critical", "High", "Medium", "Low", "None"]
+STATUS_OPTIONS   = ["Not Started", "In Progress", "Complete"]
+STATUS_BADGE     = {"Not Started": "⬜", "In Progress": "🔵", "Complete": "✅"}
+
 ACTIVITY_OPTIONS = [
     "Regular Maintenance",
     "Unplanned Maintenance",
@@ -72,6 +75,16 @@ def _db_ping() -> bool:
         return test_connection() == "ok"
     except Exception:
         return False
+
+
+@st.cache_data(ttl=30, show_spinner="Loading actions…")
+def _load_actions(eng, status, search):
+    from db_logger import fetch_action_items
+    return fetch_action_items(
+        engineer = "" if eng    == "All engineers" else eng,
+        status   = "" if status == "All statuses"  else status,
+        search   = search or "",
+    )
 
 
 def _clear_entry():
@@ -157,7 +170,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📝  New Entry", "🗄  Records"],
+        ["📝  New Entry", "🗄  Records", "✅  Actions"],
         label_visibility="collapsed",
     )
 
@@ -333,7 +346,16 @@ if "New Entry" in page:
                             engineer,
                         )
                         ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
-                        st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}")
+                        # Auto-create individual action item rows
+                        n_actions = 0
+                        if f_ai.strip():
+                            from db_logger import create_action_items_from_memo
+                            created = create_action_items_from_memo(
+                                result["id"], f_ai, engineer
+                            )
+                            n_actions = len(created)
+                        action_msg = f" + **{n_actions}** action item{'s' if n_actions != 1 else ''} created." if n_actions else ""
+                        st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}{action_msg}")
                         _clear_entry()
                         st.cache_data.clear()
                         st.rerun()
@@ -348,7 +370,7 @@ if "New Entry" in page:
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: RECORDS
 # ─────────────────────────────────────────────────────────────────────────────
-else:
+elif "Records" in page:
     st.header("🗄  Records")
 
     # ── Filters ───────────────────────────────────────────────────────────────
@@ -423,3 +445,171 @@ else:
                 f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}  ·  {summary_preview}"
             ):
                 _edit_row(row)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: ACTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+elif "Actions" in page:
+
+    st.header("✅  Action Items")
+    st.caption("Tracks all action items extracted from memo entries. Update status as work progresses.")
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    with st.container(border=True):
+        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 3])
+        f_a_eng    = fc1.selectbox("Engineer",  ["All engineers"] + TEAM_MEMBERS, key="af_eng")
+        f_a_status = fc2.selectbox("Status",    ["All statuses"]  + STATUS_OPTIONS, key="af_sta")
+        f_a_search = fc3.text_input("Search",   placeholder="keyword…", key="af_srch")
+        with fc4:
+            st.write("")
+            ac1, ac2, ac3 = st.columns(3)
+            do_refresh = ac1.button("↻ Refresh",    use_container_width=True, key="af_ref")
+            do_add_new = ac2.button("＋ Add Manual", use_container_width=True, key="af_add",
+                                    type="primary")
+
+    if do_refresh:
+        st.cache_data.clear()
+        st.rerun()
+
+    # ── Manual add form ───────────────────────────────────────────────────────
+    if do_add_new or st.session_state.get("show_add_form"):
+        st.session_state["show_add_form"] = True
+        with st.container(border=True):
+            st.subheader("Add Action Item Manually")
+            with st.form("manual_action_form"):
+                ma_text = st.text_area("Action Item", height=75,
+                    placeholder="Describe the action that needs to be done…")
+                mc1, mc2 = st.columns(2)
+                ma_eng   = mc1.selectbox("Assigned To", TEAM_MEMBERS, key="ma_eng")
+                ma_notes = mc2.text_input("Notes (optional)")
+                ms1, ms2 = st.columns([1, 4])
+                do_submit = ms1.form_submit_button("Add", type="primary",
+                                                   use_container_width=True)
+                do_cancel = ms2.form_submit_button("Cancel")
+            if do_submit:
+                if not ma_text.strip():
+                    st.warning("Enter an action item first.")
+                else:
+                    try:
+                        from db_logger import create_action_items_from_memo
+                        created = create_action_items_from_memo(
+                            memo_id=None, action_text=ma_text, engineer=ma_eng
+                        )
+                        st.success(f"Action item added.")
+                        st.session_state["show_add_form"] = False
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            if do_cancel:
+                st.session_state["show_add_form"] = False
+                st.rerun()
+
+    # ── Load and display action items ─────────────────────────────────────────
+    try:
+        actions = _load_actions(f_a_eng, f_a_status, f_a_search)
+    except Exception as e:
+        st.error(f"Could not load actions: {e}")
+        actions = []
+
+    # Summary counts
+    if actions:
+        total     = len(actions)
+        n_ns      = sum(1 for a in actions if a.get("status") == "Not Started")
+        n_ip      = sum(1 for a in actions if a.get("status") == "In Progress")
+        n_done    = sum(1 for a in actions if a.get("status") == "Complete")
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Total",       total)
+        mc2.metric("⬜ Not Started", n_ns)
+        mc3.metric("🔵 In Progress", n_ip)
+        mc4.metric("✅ Complete",    n_done)
+        st.divider()
+
+    if not actions:
+        st.info("No action items found. Action items are auto-created when you save a new entry, "
+                "or you can add them manually above.", icon="ℹ️")
+    else:
+        # Group by status for visual clarity
+        groups = [
+            ("🔵  In Progress",  "In Progress"),
+            ("⬜  Not Started",  "Not Started"),
+            ("✅  Complete",     "Complete"),
+        ]
+
+        for group_label, group_status in groups:
+            group_items = [a for a in actions if a.get("status") == group_status]
+            if not group_items:
+                continue
+
+            st.subheader(f"{group_label}  ({len(group_items)})")
+
+            for action in group_items:
+                item_id    = action["id"]
+                act_text   = action.get("action_text", "")
+                cur_status = action.get("status", "Not Started")
+                cur_notes  = action.get("notes", "") or ""
+                eng_name   = action.get("engineer", "") or "—"
+                upd        = action.get("updated_at")
+                upd_str    = upd.strftime("%Y-%m-%d %H:%M") if hasattr(upd, "strftime") else str(upd or "")
+                memo_sum   = (action.get("memo_summary") or "")[:60]
+                memo_id    = action.get("memo_id")
+                badge      = STATUS_BADGE.get(cur_status, "⬜")
+
+                exp_label = f"{badge}  {act_text[:80]}{'…' if len(act_text) > 80 else ''}  ·  *{eng_name}*"
+                if memo_sum:
+                    exp_label += f"  ·  from: _{memo_sum}_"
+
+                with st.expander(exp_label):
+                    # Full action text (read-only display, editable below)
+                    st.markdown(f"**Action:** {act_text}")
+                    ic1, ic2 = st.columns(2)
+                    ic1.caption(f"Assigned to: **{eng_name}**")
+                    ic2.caption(f"Last updated: {upd_str}")
+                    if memo_id:
+                        st.caption(f"From memo ID: {memo_id}" +
+                                   (f" — {memo_sum}" if memo_sum else ""))
+                    st.write("")
+
+                    # Inline status update form
+                    with st.form(key=f"action_form_{item_id}"):
+                        sf1, sf2 = st.columns([1, 3])
+                        new_status = sf1.selectbox(
+                            "Status",
+                            STATUS_OPTIONS,
+                            index=STATUS_OPTIONS.index(cur_status)
+                                  if cur_status in STATUS_OPTIONS else 0,
+                            key=f"sel_{item_id}",
+                        )
+                        new_notes = sf2.text_input(
+                            "Notes",
+                            value=cur_notes,
+                            placeholder="Progress notes, blockers, context…",
+                            key=f"notes_{item_id}",
+                        )
+                        bf1, bf2, _ = st.columns([1, 1, 4])
+                        do_update = bf1.form_submit_button(
+                            "💾  Save", type="primary", use_container_width=True)
+                        do_del    = bf2.form_submit_button(
+                            "🗑  Delete", use_container_width=True)
+
+                    if do_update:
+                        try:
+                            from db_logger import update_action_item
+                            update_action_item(item_id, new_status, new_notes)
+                            st.success("Updated.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+                    if do_del:
+                        try:
+                            from db_logger import delete_action_item
+                            delete_action_item(item_id)
+                            st.warning("Action item deleted.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
