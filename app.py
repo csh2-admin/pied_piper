@@ -480,9 +480,11 @@ elif "Actions" in page:
             with st.form("manual_action_form"):
                 ma_text = st.text_area("Action Item", height=75,
                     placeholder="Describe the action that needs to be done…")
-                mc1, mc2 = st.columns(2)
+                mc1, mc2, mc3, mc4 = st.columns(4)
                 ma_eng   = mc1.selectbox("Assigned To", TEAM_MEMBERS, key="ma_eng")
-                ma_notes = mc2.text_input("Notes (optional)")
+                ma_resp  = mc2.selectbox("Responsible", TEAM_MEMBERS, key="ma_resp")
+                ma_due   = mc3.date_input("Due Date", value=None, key="ma_due")
+                ma_notes = mc4.text_input("Notes (optional)")
                 ms1, ms2 = st.columns([1, 4])
                 do_submit = ms1.form_submit_button("Add", type="primary",
                                                    use_container_width=True)
@@ -494,7 +496,8 @@ elif "Actions" in page:
                     try:
                         from db_logger import create_action_items_from_memo
                         created = create_action_items_from_memo(
-                            memo_id=None, action_text=ma_text, engineer=ma_eng
+                            memo_id=None, action_text=ma_text, engineer=ma_eng,
+                            responsible=ma_resp, due_date=ma_due,
                         )
                         st.success(f"Action item added.")
                         st.session_state["show_add_form"] = False
@@ -557,16 +560,27 @@ elif "Actions" in page:
                 memo_id    = action.get("memo_id")
                 badge      = STATUS_BADGE.get(cur_status, "⬜")
 
-                exp_label = f"{badge}  {act_text[:80]}{'…' if len(act_text) > 80 else ''}  ·  *{eng_name}*"
+                cur_resp_label = action.get("responsible","") or ""
+                cur_due_label  = action.get("due_date")
+                due_label_str  = f"  ·  due {cur_due_label.strftime('%b %d')}" if hasattr(cur_due_label,"strftime") else ""
+                exp_label = (f"{badge}  {act_text[:70]}{'…' if len(act_text) > 70 else ''}"
+                             f"  ·  *{eng_name}*{due_label_str}")
+                if cur_resp_label and cur_resp_label != eng_name:
+                    exp_label += f"  ·  resp: {cur_resp_label}"
                 if memo_sum:
-                    exp_label += f"  ·  from: _{memo_sum}_"
+                    exp_label += f"  ·  _{memo_sum[:50]}_"
 
                 with st.expander(exp_label):
                     # Full action text (read-only display, editable below)
                     st.markdown(f"**Action:** {act_text}")
-                    ic1, ic2 = st.columns(2)
+                    ic1, ic2, ic3, ic4 = st.columns(4)
                     ic1.caption(f"Assigned to: **{eng_name}**")
-                    ic2.caption(f"Last updated: {upd_str}")
+                    cur_resp = action.get("responsible","") or "—"
+                    ic2.caption(f"Responsible: **{cur_resp}**")
+                    cur_due  = action.get("due_date")
+                    due_str  = cur_due.strftime("%Y-%m-%d") if hasattr(cur_due,"strftime") else (str(cur_due) if cur_due else "—")
+                    ic3.caption(f"Due: **{due_str}**")
+                    ic4.caption(f"Updated: {upd_str}")
                     if memo_id:
                         st.caption(f"From memo ID: {memo_id}" +
                                    (f" — {memo_sum}" if memo_sum else ""))
@@ -574,7 +588,7 @@ elif "Actions" in page:
 
                     # Inline status update form
                     with st.form(key=f"action_form_{item_id}"):
-                        sf1, sf2 = st.columns([1, 3])
+                        sf1, sf2, sf3, sf4 = st.columns([1, 2, 2, 2])
                         new_status = sf1.selectbox(
                             "Status",
                             STATUS_OPTIONS,
@@ -582,10 +596,22 @@ elif "Actions" in page:
                                   if cur_status in STATUS_OPTIONS else 0,
                             key=f"sel_{item_id}",
                         )
-                        new_notes = sf2.text_input(
+                        resp_idx = TEAM_MEMBERS.index(cur_resp) if cur_resp in TEAM_MEMBERS else 0
+                        new_resp = sf2.selectbox(
+                            "Responsible",
+                            TEAM_MEMBERS,
+                            index=resp_idx,
+                            key=f"resp_{item_id}",
+                        )
+                        new_due = sf3.date_input(
+                            "Due Date",
+                            value=cur_due if cur_due else None,
+                            key=f"due_{item_id}",
+                        )
+                        new_notes = sf4.text_input(
                             "Notes",
                             value=cur_notes,
-                            placeholder="Progress notes, blockers, context…",
+                            placeholder="Progress notes, blockers…",
                             key=f"notes_{item_id}",
                         )
                         bf1, bf2, _ = st.columns([1, 1, 4])
@@ -597,7 +623,8 @@ elif "Actions" in page:
                     if do_update:
                         try:
                             from db_logger import update_action_item
-                            update_action_item(item_id, new_status, new_notes)
+                            update_action_item(item_id, new_status, new_notes,
+                                               new_resp, new_due)
                             st.success("Updated.")
                             st.cache_data.clear()
                             st.rerun()

@@ -139,19 +139,25 @@ CREATE TABLE IF NOT EXISTS action_items (
     engineer    TEXT,
     action_text TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'Not Started',
+    responsible TEXT,
+    due_date    DATE,
     notes       TEXT
 );
 """
 
 INSERT_ACTION_SQL = """
-INSERT INTO action_items (memo_id, engineer, action_text, status)
-VALUES (%(memo_id)s, %(engineer)s, %(action_text)s, 'Not Started')
+INSERT INTO action_items (memo_id, engineer, action_text, status, responsible, due_date)
+VALUES (%(memo_id)s, %(engineer)s, %(action_text)s, 'Not Started', %(responsible)s, %(due_date)s)
 RETURNING id, created_at;
 """
 
 UPDATE_ACTION_STATUS_SQL = """
 UPDATE action_items
-SET status = %(status)s, notes = %(notes)s, updated_at = NOW()
+SET status      = %(status)s,
+    notes       = %(notes)s,
+    responsible = %(responsible)s,
+    due_date    = %(due_date)s,
+    updated_at  = NOW()
 WHERE id = %(id)s
 RETURNING id, updated_at;
 """
@@ -162,6 +168,7 @@ FETCH_ACTIONS_SQL = """
 SELECT
     a.id, a.created_at, a.updated_at,
     a.memo_id, a.engineer, a.action_text, a.status, a.notes,
+    a.responsible, a.due_date,
     m.logged_at AS memo_logged_at,
     m.summary   AS memo_summary,
     m.activity_type AS memo_activity_type
@@ -373,7 +380,8 @@ def parse_action_items(action_text: str) -> list[str]:
 
 
 def create_action_items_from_memo(memo_id, action_text: str,
-                                   engineer: str) -> list[dict]:
+                                   engineer: str, responsible: str = "",
+                                   due_date=None) -> list[dict]:
     """
     Parse action_text and insert one row per action item.
     Returns list of created rows with id and created_at.
@@ -392,6 +400,8 @@ def create_action_items_from_memo(memo_id, action_text: str,
                         "memo_id":     memo_id,
                         "engineer":    engineer,
                         "action_text": text,
+                        "responsible": responsible or "",
+                        "due_date":    due_date,
                     })
                     row_id, created_at = cur.fetchone()
                     created.append({"id": row_id, "created_at": created_at,
@@ -401,16 +411,19 @@ def create_action_items_from_memo(memo_id, action_text: str,
     return created
 
 
-def update_action_item(item_id: int, status: str, notes: str = "") -> dict:
-    """Update the status and optional notes of an action item."""
+def update_action_item(item_id: int, status: str, notes: str = "",
+                         responsible: str = "", due_date=None) -> dict:
+    """Update the status, notes, responsible, and due_date of an action item."""
     conn = _connect()
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(UPDATE_ACTION_STATUS_SQL, {
-                    "id":     item_id,
-                    "status": status,
-                    "notes":  notes or "",
+                    "id":          item_id,
+                    "status":      status,
+                    "notes":       notes or "",
+                    "responsible": responsible or "",
+                    "due_date":    due_date,
                 })
                 row_id, updated_at = cur.fetchone()
         return {"id": row_id, "updated_at": updated_at}
