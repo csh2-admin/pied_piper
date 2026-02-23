@@ -7,6 +7,7 @@ TimescaleDB Cloud (tsdb.cloud) and self-hosted TimescaleDB.
 Example DB_URI formats:
   TimescaleDB Cloud: postgres://tsdbadmin:password@host.tsdb.cloud:12345/tsdb
   Self-hosted:       postgresql://user:password@localhost:5432/mydb
+  commenting
 """
 
 import json
