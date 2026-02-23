@@ -5,8 +5,6 @@ Run locally:   streamlit run app.py
 Deploy:        push to GitHub → connect on share.streamlit.io
 """
 
-"commenting"
-
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +46,7 @@ for k, v in {
     "source_label": "",
     "audio_bytes":  None,
     "audio_suffix": ".wav",
+    "chat_history": [],   # list of {"role": "user"|"assistant", "content": str, "sql": str|None, "rows": list|None}
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -172,7 +171,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📝  New Entry", "🗄  Records", "✅  Actions"],
+        ["📝  New Entry", "🗄  Records", "✅  Actions", "🤖  Ask Claude"],
         label_visibility="collapsed",
     )
 
@@ -642,3 +641,195 @@ elif "Actions" in page:
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: ASK CLAUDE
+# ─────────────────────────────────────────────────────────────────────────────
+elif "Ask Claude" in page:
+
+    import json
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+    st.header("🤖  Ask Claude")
+    st.caption("Ask questions about your records in plain English. Claude will query the database and explain the results.")
+
+    # ── Example prompts ───────────────────────────────────────────────────────
+    with st.expander("💡  Example questions", expanded=False):
+        examples = [
+            "What day did we first observe oscillations?",
+            "Summarise all records where we received a hydrogen delivery",
+            "Which engineer has logged the most Critical or High severity entries?",
+            "List all unplanned maintenance events in the last 30 days",
+            "What action items are overdue?",
+            "Show me every entry that mentions the pressure sensor",
+            "How many hours of maintenance did we log in total?",
+            "What were the most common components affected across all entries?",
+        ]
+        cols = st.columns(2)
+        for i, ex in enumerate(examples):
+            if cols[i % 2].button(ex, key=f"ex_{i}", use_container_width=True):
+                st.session_state["prefill_question"] = ex
+                st.rerun()
+
+    st.divider()
+
+    # ── Chat history display ──────────────────────────────────────────────────
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "user":
+            with st.chat_message("user"):
+                st.write(msg["content"])
+        else:
+            with st.chat_message("assistant", avatar="🤖"):
+                st.write(msg["content"])
+                # Show the SQL in an expander if present
+                if msg.get("sql"):
+                    with st.expander("🔍  SQL query used", expanded=False):
+                        st.code(msg["sql"], language="sql")
+                # Show raw results table if present and not too large
+                if msg.get("rows") is not None:
+                    rows = msg["rows"]
+                    if rows:
+                        with st.expander(f"📋  Raw results ({len(rows)} row{'s' if len(rows)!=1 else ''})", expanded=False):
+                            st.dataframe(rows, use_container_width=True)
+                    else:
+                        st.caption("_Query returned no rows._")
+
+    # ── Input ─────────────────────────────────────────────────────────────────
+    prefill = st.session_state.pop("prefill_question", "")
+    question = st.chat_input("Ask anything about your records…")
+
+    # Use prefill if no direct input
+    if prefill and not question:
+        question = prefill
+
+    if question:
+        # Add user message to history and display immediately
+        st.session_state.chat_history.append({
+            "role": "user", "content": question, "sql": None, "rows": None
+        })
+
+        with st.chat_message("user"):
+            st.write(question)
+
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Claude is querying your database…"):
+                try:
+                    from db_logger import DB_SCHEMA, run_read_query
+
+                    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+                    # ── Step 1: Ask Claude to write a SQL query ───────────────
+                    sql_system = f"""You are a SQL expert assistant for a hardware test team.
+Your job is to translate natural language questions into PostgreSQL SELECT queries.
+
+{DB_SCHEMA}
+
+Rules:
+- Return ONLY a valid PostgreSQL SELECT query — no explanation, no markdown, no code fences.
+- Use only SELECT statements. Never use INSERT, UPDATE, DELETE, DROP, etc.
+- Use ILIKE for case-insensitive text search.
+- Dates are stored as TIMESTAMPTZ in UTC. Use NOW() for current time.
+- When searching free-text fields (summary, raw_transcript, issues_found, etc.), 
+  search across all relevant text columns using OR.
+- Limit results to 200 rows maximum unless the question asks for aggregates.
+- For "recent" without a specific timeframe, use the last 90 days.
+- Return only the SQL query, nothing else."""
+
+                    sql_response = client.messages.create(
+                        model=CLAUDE_MODEL,
+                        max_tokens=512,
+                        system=sql_system,
+                        messages=[{"role": "user", "content": question}],
+                    )
+                    raw_sql = sql_response.content[0].text.strip()
+
+                    # Strip markdown fences if Claude added them anyway
+                    if raw_sql.startswith("```"):
+                        raw_sql = raw_sql.split("```")[1]
+                        if raw_sql.lower().startswith("sql"):
+                            raw_sql = raw_sql[3:]
+                        raw_sql = raw_sql.strip()
+
+                    # ── Step 2: Run the query ─────────────────────────────────
+                    rows = run_read_query(raw_sql)
+
+                    # ── Step 3: Ask Claude to summarise the results ───────────
+                    # Serialize rows for Claude — truncate very large result sets
+                    MAX_ROWS_FOR_SUMMARY = 50
+                    rows_for_summary = rows[:MAX_ROWS_FOR_SUMMARY]
+
+                    # Convert dates/datetimes to strings for JSON serialisation
+                    def _serialise(obj):
+                        if hasattr(obj, "isoformat"):
+                            return obj.isoformat()
+                        return str(obj)
+
+                    rows_json = json.dumps(rows_for_summary, default=_serialise, indent=2)
+                    truncation_note = (
+                        f"\n(Showing first {MAX_ROWS_FOR_SUMMARY} of {len(rows)} total rows.)"
+                        if len(rows) > MAX_ROWS_FOR_SUMMARY else ""
+                    )
+
+                    summary_system = """You are a helpful assistant summarising database query results 
+for a hardware test engineering team. Be concise and specific. 
+Highlight the most important findings. Use bullet points for lists of items.
+If the result is empty, say so clearly and suggest why the search may have returned nothing.
+Do not mention SQL or databases in your response — just answer the question naturally."""
+
+                    summary_prompt = (
+                        f"The engineer asked: \"{question}\"\n\n"
+                        f"The query returned {len(rows)} result(s){truncation_note}:\n\n"
+                        f"{rows_json if rows else '(no results)'}\n\n"
+                        f"Please answer the engineer's question based on these results."
+                    )
+
+                    summary_response = client.messages.create(
+                        model=CLAUDE_MODEL,
+                        max_tokens=1024,
+                        system=summary_system,
+                        messages=[{"role": "user", "content": summary_prompt}],
+                    )
+                    answer = summary_response.content[0].text.strip()
+
+                    # Display answer
+                    st.write(answer)
+                    if raw_sql:
+                        with st.expander("🔍  SQL query used", expanded=False):
+                            st.code(raw_sql, language="sql")
+                    if rows:
+                        with st.expander(f"📋  Raw results ({len(rows)} row{'s' if len(rows)!=1 else ''})", expanded=False):
+                            import pandas as pd
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    elif rows is not None:
+                        st.caption("_Query returned no rows._")
+
+                    # Save to history
+                    st.session_state.chat_history.append({
+                        "role":    "assistant",
+                        "content": answer,
+                        "sql":     raw_sql,
+                        "rows":    rows,
+                    })
+
+                except ValueError as e:
+                    # SQL safety rejection
+                    msg = f"I wasn't able to run that query safely: {e}"
+                    st.warning(msg)
+                    st.session_state.chat_history.append({
+                        "role": "assistant", "content": msg, "sql": None, "rows": None
+                    })
+                except Exception as e:
+                    msg = f"Something went wrong: {e}"
+                    st.error(msg)
+                    st.session_state.chat_history.append({
+                        "role": "assistant", "content": msg, "sql": None, "rows": None
+                    })
+
+    # ── Clear chat ────────────────────────────────────────────────────────────
+    if st.session_state.chat_history:
+        st.divider()
+        if st.button("🗑  Clear conversation", use_container_width=False):
+            st.session_state.chat_history = []
+            st.rerun()
