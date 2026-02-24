@@ -14,8 +14,8 @@ from config import TEAM_MEMBERS
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Hardware Development Logs",
-    page_icon="⚙",
+    page_title="Weebo",
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -415,7 +415,7 @@ def _edit_row(row: dict):
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### HARDWARE DEVELOPMENT LOGS")
+    st.markdown("### WEEBO")
     st.caption("Hardware Test Programme")
     st.divider()
 
@@ -1218,12 +1218,20 @@ elif page == "Gantt":
             marker_line_color="#0b0c0e",
             marker_line_width=1,
         )
-        # Today marker
-        fig.add_vline(
-            x=date.today().isoformat(),
-            line_color="#c9a84c", line_width=1, line_dash="dash",
-            annotation_text="TODAY",
-            annotation_font=dict(color="#c9a84c", size=9, family="Share Tech Mono"),
+        # Today marker — add_vline annotation is broken in newer Plotly,
+        # use add_shape + add_annotation instead
+        today_str = date.today().isoformat()
+        fig.add_shape(
+            type="line",
+            x0=today_str, x1=today_str, y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(color="#c9a84c", width=1, dash="dash"),
+        )
+        fig.add_annotation(
+            x=today_str, y=1, xref="x", yref="paper",
+            text="TODAY", showarrow=False,
+            font=dict(color="#c9a84c", size=9, family="Share Tech Mono"),
+            yanchor="bottom",
         )
 
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
