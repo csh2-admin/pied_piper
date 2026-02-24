@@ -1031,8 +1031,8 @@ elif page == "Ask Claude":
             st.write(question)
 
         with st.chat_message("assistant", avatar="🤖"):
-            _pin = st.empty()
-            _pin.markdown(PINOCCHIO_HTML, unsafe_allow_html=True)
+            with st.status("", expanded=True) as _status:
+                st.markdown(PINOCCHIO_HTML, unsafe_allow_html=True)
             try:
                 from db_logger import DB_SCHEMA, run_read_query
 
@@ -1111,7 +1111,8 @@ Do not mention SQL or databases in your response — just answer the question na
                 )
                 answer = summary_response.content[0].text.strip()
 
-                # Display answer
+                # Collapse the loading animation, show answer
+                _status.update(state="complete", expanded=False)
                 st.write(answer)
                 if raw_sql:
                     with st.expander("🔍  SQL query used", expanded=False):
@@ -1132,7 +1133,7 @@ Do not mention SQL or databases in your response — just answer the question na
                 })
 
             except ValueError as e:
-                _pin.empty()
+                _status.update(state="error", expanded=False)
                 # SQL safety rejection
                 msg = f"I wasn't able to run that query safely: {e}"
                 st.warning(msg)
@@ -1140,7 +1141,7 @@ Do not mention SQL or databases in your response — just answer the question na
                     "role": "assistant", "content": msg, "sql": None, "rows": None
                 })
             except Exception as e:
-                _pin.empty()
+                _status.update(state="error", expanded=False)
                 msg = f"Something went wrong: {e}"
                 st.error(msg)
                 st.session_state.chat_history.append({
