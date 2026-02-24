@@ -14,11 +14,261 @@ from config import TEAM_MEMBERS
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Voice Memo Logger",
-    page_icon="🎙",
+    page_title="Hardware Development Logs",
+    page_icon="⚙",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Theme CSS ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Google Font ── */
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
+
+/* ── Root colours ── */
+:root {
+    --gold:    #c9a84c;
+    --gold-dim:#8a6f2e;
+    --bg:      #0b0c0e;
+    --bg2:     #111318;
+    --bg3:     #181b21;
+    --border:  #2a2d35;
+    --text:    #c8cdd8;
+    --muted:   #5a6070;
+    --success: #4a7c59;
+    --danger:  #7c3a3a;
+}
+
+/* ── Global ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background-color: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'Rajdhani', sans-serif !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background-color: var(--bg2) !important;
+    border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] h3 {
+    color: var(--gold) !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    letter-spacing: 0.08em;
+    font-size: 0.95rem !important;
+    text-transform: uppercase;
+}
+
+/* ── Radio nav items ── */
+[data-testid="stSidebar"] label {
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.1em !important;
+    color: var(--muted) !important;
+    text-transform: uppercase;
+    padding: 4px 0 !important;
+}
+[data-testid="stSidebar"] label:hover {
+    color: var(--gold) !important;
+}
+/* selected nav item */
+[data-testid="stSidebar"] [data-baseweb="radio"] [aria-checked="true"] + div label,
+[data-testid="stSidebar"] [aria-checked="true"] ~ div {
+    color: var(--gold) !important;
+}
+
+/* ── Main headers ── */
+h1, h2 {
+    font-family: 'Share Tech Mono', monospace !important;
+    color: var(--gold) !important;
+    letter-spacing: 0.15em !important;
+    font-weight: 400 !important;
+    border-bottom: 1px solid var(--gold-dim);
+    padding-bottom: 0.4em;
+}
+h3, h4 {
+    font-family: 'Share Tech Mono', monospace !important;
+    color: var(--text) !important;
+    letter-spacing: 0.1em !important;
+    font-weight: 400 !important;
+}
+
+/* ── Metric cards — corner bracket style ── */
+[data-testid="stMetric"] {
+    background-color: var(--bg3) !important;
+    padding: 16px 20px !important;
+    position: relative;
+}
+[data-testid="stMetric"]::before,
+[data-testid="stMetric"]::after {
+    content: '';
+    position: absolute;
+    width: 10px; height: 10px;
+    border-color: var(--gold);
+    border-style: solid;
+}
+[data-testid="stMetric"]::before {
+    top: 4px; left: 4px;
+    border-width: 1px 0 0 1px;
+}
+[data-testid="stMetric"]::after {
+    bottom: 4px; right: 4px;
+    border-width: 0 1px 1px 0;
+}
+[data-testid="stMetricLabel"] {
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.7rem !important;
+    letter-spacing: 0.15em !important;
+    color: var(--muted) !important;
+    text-transform: uppercase !important;
+}
+[data-testid="stMetricValue"] {
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 1.8rem !important;
+    color: var(--text) !important;
+    font-weight: 400 !important;
+}
+
+/* ── Containers / borders ── */
+[data-testid="stVerticalBlockBorderWrapper"] > div {
+    border: 1px solid var(--border) !important;
+    background-color: var(--bg2) !important;
+    border-radius: 0 !important;
+}
+
+/* ── Inputs ── */
+input, textarea, [data-baseweb="input"] input,
+[data-baseweb="textarea"] textarea {
+    background-color: var(--bg3) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.85rem !important;
+}
+input:focus, textarea:focus {
+    border-color: var(--gold) !important;
+    box-shadow: 0 0 0 1px var(--gold-dim) !important;
+}
+
+/* ── Select / combobox ── */
+[data-baseweb="select"] > div {
+    background-color: var(--bg3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    color: var(--text) !important;
+}
+[data-baseweb="popover"] {
+    background-color: var(--bg2) !important;
+    border: 1px solid var(--gold-dim) !important;
+}
+
+/* ── Buttons ── */
+button[kind="primary"], [data-testid="baseButton-primary"] {
+    background-color: transparent !important;
+    color: var(--gold) !important;
+    border: 1px solid var(--gold) !important;
+    border-radius: 0 !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    letter-spacing: 0.1em !important;
+    font-size: 0.78rem !important;
+    text-transform: uppercase !important;
+}
+button[kind="primary"]:hover {
+    background-color: var(--gold) !important;
+    color: var(--bg) !important;
+}
+button[kind="secondary"], [data-testid="baseButton-secondary"] {
+    background-color: transparent !important;
+    color: var(--muted) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    letter-spacing: 0.08em !important;
+    font-size: 0.78rem !important;
+    text-transform: uppercase !important;
+}
+button[kind="secondary"]:hover {
+    border-color: var(--muted) !important;
+    color: var(--text) !important;
+}
+
+/* ── Expanders ── */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    background-color: var(--bg2) !important;
+}
+[data-testid="stExpander"] summary {
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.8rem !important;
+    letter-spacing: 0.06em !important;
+    color: var(--text) !important;
+}
+[data-testid="stExpander"] summary:hover {
+    color: var(--gold) !important;
+}
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border) !important;
+}
+
+/* ── Success / error / info banners ── */
+[data-testid="stAlert"] {
+    border-radius: 0 !important;
+    border-left: 3px solid var(--gold) !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.04em !important;
+}
+
+/* ── Dividers ── */
+hr {
+    border-color: var(--border) !important;
+}
+
+/* ── Caption / small text ── */
+[data-testid="stCaptionContainer"] p,
+small, .stCaption {
+    font-family: 'Share Tech Mono', monospace !important;
+    color: var(--muted) !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.08em !important;
+}
+
+/* ── Markdown body text ── */
+p, li {
+    font-family: 'Rajdhani', sans-serif !important;
+    color: var(--text) !important;
+    font-size: 1rem !important;
+}
+
+/* ── Code blocks (SQL display) ── */
+code, pre {
+    background-color: var(--bg3) !important;
+    color: var(--gold) !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+}
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    background-color: var(--bg2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); }
+::-webkit-scrollbar-thumb:hover { background: var(--gold-dim); }
+</style>
+""", unsafe_allow_html=True)
+
 
 SEV_BADGE = {
     "Critical": "🔴", "High": "🟠",
@@ -165,18 +415,18 @@ def _edit_row(row: dict):
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🎙 Voice Memo Logger")
-    st.caption("Hardware Test — Daily Log")
+    st.markdown("### HARDWARE DEVELOPMENT LOGS")
+    st.caption("Hardware Test Programme")
     st.divider()
 
     page = st.radio(
         "Navigate",
-        ["📝  New Entry", "🗄  Records", "✅  Actions", "🤖  Ask Claude"],
+        ["New Entry", "Records", "Actions", "Ask Claude"],
         label_visibility="collapsed",
     )
 
     st.divider()
-    engineer = st.selectbox("👤  Engineer", TEAM_MEMBERS)
+    engineer = st.selectbox("ENGINEER", TEAM_MEMBERS)
 
     st.divider()
     db_ok = _db_ping()
@@ -190,13 +440,13 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: NEW ENTRY
 # ─────────────────────────────────────────────────────────────────────────────
-if "New Entry" in page:
+if page == "New Entry":
 
-    st.header("📝  New Entry")
+    st.header("NEW ENTRY")
 
     # ── Step 1: Audio ─────────────────────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Step 1 — Audio")
+        st.subheader("STEP 1 — AUDIO")
         mode = st.radio("Source", ["📂  Upload file", "🎙  Record now"],
                         horizontal=True, label_visibility="collapsed")
 
@@ -223,7 +473,7 @@ if "New Entry" in page:
 
     # ── Step 2: Transcribe ────────────────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Step 2 — Transcribe")
+        st.subheader("STEP 2 — TRANSCRIBE")
 
         if st.button("🔤  Transcribe Audio",
                      disabled=not st.session_state.audio_bytes,
@@ -254,7 +504,7 @@ if "New Entry" in page:
 
     # ── Step 3: Extract ───────────────────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Step 3 — Extract with Claude")
+        st.subheader("STEP 3 — EXTRACT WITH CLAUDE")
 
         if st.button("✨  Extract Insights",
                      disabled=not st.session_state.transcript.strip(),
@@ -272,7 +522,7 @@ if "New Entry" in page:
 
     # ── Step 4: Review, Edit & Save ───────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Step 4 — Review, Edit & Save")
+        st.subheader("STEP 4 — REVIEW, EDIT & SAVE")
 
         if not st.session_state.insights:
             st.caption("Extract insights first to unlock this section.")
@@ -371,12 +621,12 @@ if "New Entry" in page:
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: RECORDS
 # ─────────────────────────────────────────────────────────────────────────────
-elif "Records" in page:
-    st.header("🗄  Records")
+elif page == "Records":
+    st.header("RECORDS")
 
     # ── Filters ───────────────────────────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("Filters")
+        st.subheader("FILTERS")
         fc1, fc2, fc3, fc4 = st.columns(4)
         f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS)
         f_act  = fc2.selectbox("Activity Type", ["All types"] + ACTIVITY_OPTIONS)
@@ -451,10 +701,10 @@ elif "Records" in page:
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: ACTIONS
 # ─────────────────────────────────────────────────────────────────────────────
-elif "Actions" in page:
+elif page == "Actions":
 
-    st.header("✅  Action Items")
-    st.caption("Tracks all action items extracted from memo entries. Update status as work progresses.")
+    st.header("ACTION ITEMS")
+    st.caption("Action items extracted from log entries. Update status as work progresses.")
 
     # ── Filters ───────────────────────────────────────────────────────────────
     with st.container(border=True):
@@ -477,7 +727,7 @@ elif "Actions" in page:
     if do_add_new or st.session_state.get("show_add_form"):
         st.session_state["show_add_form"] = True
         with st.container(border=True):
-            st.subheader("Add Action Item Manually")
+            st.subheader("ADD ACTION ITEM")
             with st.form("manual_action_form"):
                 ma_text = st.text_area("Action Item", height=75,
                     placeholder="Describe the action that needs to be done…")
@@ -646,14 +896,14 @@ elif "Actions" in page:
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: ASK CLAUDE
 # ─────────────────────────────────────────────────────────────────────────────
-elif "Ask Claude" in page:
+elif page == "Ask Claude":
 
     import json
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
-    st.header("🤖  Ask Claude")
-    st.caption("Ask questions about your records in plain English. Claude will query the database and explain the results.")
+    st.header("ASK CLAUDE")
+    st.caption("Query your log database in plain English.")
 
     # ── Example prompts ───────────────────────────────────────────────────────
     with st.expander("💡  Example questions", expanded=False):

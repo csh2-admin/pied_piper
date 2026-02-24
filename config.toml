@@ -1,9 +1,10 @@
 [theme]
-base            = "dark"
-primaryColor    = "#4a9eff"
-backgroundColor = "#1e2227"
-secondaryBackgroundColor = "#262b33"
-textColor       = "#e8edf3"
+base                     = "dark"
+primaryColor             = "#c9a84c"
+backgroundColor          = "#0b0c0e"
+secondaryBackgroundColor = "#111318"
+textColor                = "#c8cdd8"
+font                     = "monospace"
 
 [server]
-maxUploadSize = 200   # MB — allows large audio files
+maxUploadSize = 200
