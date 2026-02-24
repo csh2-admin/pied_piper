@@ -421,7 +421,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["New Entry", "Records", "Actions", "Ask Claude"],
+        ["New Entry", "Records", "Actions", "Gantt", "Ask Claude"],
         label_visibility="collapsed",
     )
 
@@ -1083,3 +1083,421 @@ Do not mention SQL or databases in your response — just answer the question na
         if st.button("🗑  Clear conversation", use_container_width=False):
             st.session_state.chat_history = []
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: GANTT
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Gantt":
+    import json
+    import pandas as pd
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from datetime import date, timedelta
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+    from db_logger import (fetch_gantt_tasks, create_gantt_task,
+                            update_gantt_task, delete_gantt_task,
+                            bulk_insert_gantt_tasks, ensure_gantt_schema,
+                            fetch_action_items)
+
+    ensure_gantt_schema()
+
+    st.header("GANTT CHART")
+    st.caption("Project schedule with dependencies. Edit tasks inline or sync from action items.")
+
+    # ── Status colours matching theme ─────────────────────────────────────────
+    GANTT_STATUS_COLOUR = {
+        "Not Started": "#2a2d35",
+        "In Progress":  "#5a7a9a",
+        "Complete":     "#4a7c59",
+        "Blocked":      "#7c3a3a",
+    }
+    GANTT_STATUS_OPTIONS = ["Not Started", "In Progress", "Complete", "Blocked"]
+
+    # ── Load tasks ────────────────────────────────────────────────────────────
+    @st.cache_data(ttl=15, show_spinner=False)
+    def _load_gantt():
+        return fetch_gantt_tasks()
+
+    tasks = _load_gantt()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CHART
+    # ─────────────────────────────────────────────────────────────────────────
+    if tasks:
+        df = pd.DataFrame(tasks)
+
+        # Ensure date columns are proper dates
+        df["start_date"] = pd.to_datetime(df["start_date"]).dt.date
+        df["end_date"]   = pd.to_datetime(df["end_date"]).dt.date
+
+        # Plotly needs datetime for timeline
+        df["start_dt"] = pd.to_datetime(df["start_date"])
+        df["end_dt"]   = pd.to_datetime(df["end_date"]) + pd.Timedelta(days=1)
+
+        df["colour"] = df["status"].map(GANTT_STATUS_COLOUR).fillna("#2a2d35")
+        df["label"]  = df.apply(
+            lambda r: f"{r['title']}" + (f" [{r['assignee']}]" if r.get("assignee") else ""),
+            axis=1
+        )
+        # Category swimlane — fall back to assignee then "General"
+        df["swim"] = df["category"].fillna("").replace("", None)
+        df["swim"] = df["swim"].fillna(df["assignee"].fillna("").replace("", None))
+        df["swim"] = df["swim"].fillna("General")
+
+        fig = px.timeline(
+            df,
+            x_start="start_dt",
+            x_end="end_dt",
+            y="label",
+            color="status",
+            color_discrete_map=GANTT_STATUS_COLOUR,
+            custom_data=["id", "assignee", "status", "notes", "dependencies"],
+        )
+
+        # Draw dependency arrows
+        id_to_row = {int(r["id"]): r for _, r in df.iterrows()}
+        shapes, annotations = [], []
+        for _, row in df.iterrows():
+            deps_str = str(row.get("dependencies") or "")
+            if not deps_str.strip():
+                continue
+            for dep_id_str in deps_str.split(","):
+                dep_id_str = dep_id_str.strip()
+                if not dep_id_str.isdigit():
+                    continue
+                dep_id = int(dep_id_str)
+                if dep_id not in id_to_row:
+                    continue
+                dep_row = id_to_row[dep_id]
+                shapes.append(dict(
+                    type="line",
+                    x0=dep_row["end_dt"], y0=dep_row["label"],
+                    x1=row["start_dt"],   y1=row["label"],
+                    line=dict(color="#c9a84c", width=1, dash="dot"),
+                    xref="x", yref="y",
+                ))
+
+        fig.update_layout(
+            plot_bgcolor  ="#0b0c0e",
+            paper_bgcolor ="#0b0c0e",
+            font=dict(family="Share Tech Mono, monospace", color="#c8cdd8", size=11),
+            xaxis=dict(
+                showgrid=True, gridcolor="#1e2128", gridwidth=1,
+                tickfont=dict(color="#5a6070", size=10),
+                title=None,
+                rangeselector=dict(
+                    bgcolor="#111318", activecolor="#c9a84c",
+                    font=dict(color="#c8cdd8"),
+                    buttons=[
+                        dict(count=1, label="1M", step="month", stepmode="backward"),
+                        dict(count=3, label="3M", step="month", stepmode="backward"),
+                        dict(count=6, label="6M", step="month", stepmode="backward"),
+                        dict(step="all", label="ALL"),
+                    ],
+                ),
+            ),
+            yaxis=dict(
+                showgrid=False,
+                tickfont=dict(color="#c8cdd8", size=10),
+                title=None,
+                autorange="reversed",
+            ),
+            legend=dict(
+                bgcolor="#111318", bordercolor="#2a2d35", borderwidth=1,
+                font=dict(color="#c8cdd8", size=10),
+                title=dict(text="STATUS", font=dict(color="#c9a84c")),
+            ),
+            shapes=shapes,
+            margin=dict(l=20, r=20, t=20, b=20),
+            height=max(300, len(df) * 38 + 80),
+            hoverlabel=dict(bgcolor="#111318", font=dict(family="Share Tech Mono")),
+        )
+        fig.update_traces(
+            marker_line_color="#0b0c0e",
+            marker_line_width=1,
+        )
+        # Today marker
+        fig.add_vline(
+            x=pd.Timestamp(date.today()),
+            line_color="#c9a84c", line_width=1, line_dash="dash",
+            annotation_text="TODAY",
+            annotation_font=dict(color="#c9a84c", size=9, family="Share Tech Mono"),
+        )
+
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("No tasks yet. Add tasks below or sync from your action items.", icon="ℹ️")
+
+    st.divider()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SYNC FROM ACTION ITEMS (Claude)
+    # ─────────────────────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.subheader("SYNC FROM ACTION ITEMS")
+        st.caption("Claude reads your open action items and proposes Gantt tasks with estimated dates and dependencies.")
+
+        sc1, sc2 = st.columns([3, 1])
+        anchor_date = sc1.date_input(
+            "Schedule anchor (project start or today)",
+            value=date.today(),
+            key="gantt_anchor",
+        )
+        do_sync = sc2.button("Generate Plan", type="primary",
+                             use_container_width=True, key="gantt_sync")
+
+        if do_sync:
+            with st.spinner("Claude is reading your action items and building a schedule…"):
+                try:
+                    action_rows = fetch_action_items()
+                    open_items  = [a for a in action_rows
+                                   if a.get("status") != "Complete"]
+
+                    if not open_items:
+                        st.warning("No open action items found — mark some as Not Started or In Progress first.")
+                    else:
+                        def _s(obj):
+                            return obj.isoformat() if hasattr(obj, "isoformat") else str(obj or "")
+
+                        items_text = "\n".join(
+                            f"- ID {a['id']}: {a['action_text']} "
+                            f"[responsible: {a.get('responsible') or 'unassigned'}, "
+                            f"due: {_s(a.get('due_date'))}, "
+                            f"status: {a.get('status')}]"
+                            for a in open_items
+                        )
+
+                        existing_tasks_text = ""
+                        if tasks:
+                            existing_tasks_text = "\n\nExisting Gantt tasks (avoid duplicating):\n" + "\n".join(
+                                f"- ID {t['id']}: {t['title']} "
+                                f"({_s(t.get('start_date'))} → {_s(t.get('end_date'))})"
+                                for t in tasks
+                            )
+
+                        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+                        system = f"""You are a project planning assistant for a hardware test engineering team.
+Your job is to convert a list of action items into a structured Gantt chart schedule.
+
+Today is {date.today().isoformat()}.
+Schedule anchor (project start): {anchor_date.isoformat()}.
+
+Rules:
+- Return ONLY a valid JSON array, no markdown, no explanation.
+- Each element is a task object with these exact keys:
+  {{
+    "title":         string  (concise task name, max 60 chars),
+    "assignee":      string  (person's name, or "" if unassigned),
+    "start_date":    string  (YYYY-MM-DD),
+    "end_date":      string  (YYYY-MM-DD, must be >= start_date),
+    "status":        string  ("Not Started" | "In Progress" | "Complete" | "Blocked"),
+    "dependencies":  string  (comma-separated task INDEX values from THIS array, e.g. "0,2", or ""),
+    "action_item_id": number | null  (the source action item ID if derived from one),
+    "category":      string  (logical group, e.g. "Procurement", "Testing", "Infrastructure"),
+    "notes":         string
+  }}
+- Group related items into logical categories.
+- Estimate durations based on complexity — simple tasks 1-3 days, complex 1-2 weeks.
+- Sequence tasks logically — prerequisites before dependents.
+- If an action item has a due_date, try to end the task by that date.
+- dependencies references the 0-based INDEX of other tasks in the array you return.
+- Return between 1 and 30 tasks.
+"""
+
+                        prompt = f"""Convert these open action items into a Gantt schedule:
+
+{items_text}{existing_tasks_text}
+
+Return only the JSON array of task objects."""
+
+                        response = client.messages.create(
+                            model=CLAUDE_MODEL,
+                            max_tokens=2048,
+                            system=system,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                        raw = response.content[0].text.strip()
+                        if raw.startswith("```"):
+                            raw = raw.split("```")[1]
+                            if raw.lower().startswith("json"):
+                                raw = raw[4:]
+                            raw = raw.strip()
+
+                        proposed = json.loads(raw)
+
+                        # Convert dependency indices to actual IDs after insert
+                        # First insert all tasks, then update dependencies
+                        # We'll resolve indices → IDs post-insert
+                        id_map = {}   # index → db id
+                        for idx, task in enumerate(proposed):
+                            # Temporarily clear dependencies — resolve after
+                            task_copy = dict(task)
+                            task_copy["dependencies"] = ""
+                            result = create_gantt_task(task_copy)
+                            id_map[idx] = result["id"]
+
+                        # Second pass: update dependencies using real IDs
+                        for idx, task in enumerate(proposed):
+                            dep_str = str(task.get("dependencies") or "").strip()
+                            if dep_str:
+                                real_deps = []
+                                for d in dep_str.split(","):
+                                    d = d.strip()
+                                    if d.isdigit() and int(d) in id_map:
+                                        real_deps.append(str(id_map[int(d)]))
+                                if real_deps:
+                                    update_gantt_task(id_map[idx], {
+                                        **{k: task.get(k) for k in
+                                           ["title","assignee","start_date","end_date",
+                                            "status","notes","category"]},
+                                        "dependencies": ",".join(real_deps),
+                                    })
+
+                        st.success(f"✅ {len(proposed)} tasks added to Gantt.")
+                        st.cache_data.clear()
+                        st.rerun()
+
+                except json.JSONDecodeError as e:
+                    st.error(f"Claude returned invalid JSON: {e}\n\nTry again.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADD TASK MANUALLY
+    # ─────────────────────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.subheader("ADD TASK")
+        with st.form("add_gantt_form"):
+            gc1, gc2 = st.columns(2)
+            g_title    = gc1.text_input("Title *", placeholder="Task name")
+            g_category = gc2.text_input("Category", placeholder="e.g. Testing, Procurement")
+
+            gc3, gc4, gc5 = st.columns(3)
+            g_assignee = gc3.selectbox("Assignee", [""] + TEAM_MEMBERS, key="g_assignee")
+            g_start    = gc4.date_input("Start Date *", value=date.today(), key="g_start")
+            g_end      = gc5.date_input("End Date *",   value=date.today() + timedelta(days=7), key="g_end")
+
+            gc6, gc7 = st.columns(2)
+            g_status = gc6.selectbox("Status", GANTT_STATUS_OPTIONS, key="g_status")
+
+            # Build dependency options from existing tasks
+            dep_options = {str(t["id"]): f"#{t['id']} — {t['title'][:50]}" for t in tasks}
+            g_deps = gc7.multiselect(
+                "Depends on",
+                options=list(dep_options.keys()),
+                format_func=lambda x: dep_options.get(x, x),
+                key="g_deps",
+            )
+            g_notes = st.text_area("Notes", height=60, key="g_notes")
+
+            do_add = st.form_submit_button("Add Task", type="primary")
+
+        if do_add:
+            if not g_title.strip():
+                st.warning("Title is required.")
+            elif g_end < g_start:
+                st.warning("End date must be on or after start date.")
+            else:
+                try:
+                    create_gantt_task({
+                        "title":       g_title,
+                        "assignee":    g_assignee,
+                        "start_date":  g_start,
+                        "end_date":    g_end,
+                        "status":      g_status,
+                        "dependencies": ",".join(g_deps),
+                        "category":    g_category,
+                        "notes":       g_notes,
+                    })
+                    st.success(f"Task '{g_title}' added.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # EDIT / DELETE EXISTING TASKS
+    # ─────────────────────────────────────────────────────────────────────────
+    if tasks:
+        with st.container(border=True):
+            st.subheader("EDIT TASKS")
+
+            for t in tasks:
+                tid      = t["id"]
+                t_start  = t["start_date"] if isinstance(t["start_date"], date) else pd.to_datetime(t["start_date"]).date()
+                t_end    = t["end_date"]   if isinstance(t["end_date"],   date) else pd.to_datetime(t["end_date"]).date()
+                t_status = t.get("status","Not Started")
+                colour   = GANTT_STATUS_COLOUR.get(t_status, "#2a2d35")
+
+                # Compact header line
+                dep_preview = f" ← {t['dependencies']}" if t.get("dependencies") else ""
+                with st.expander(
+                    f"#{tid}  {t['title']}  ·  {t_start} → {t_end}  ·  {t_status}{dep_preview}"
+                ):
+                    with st.form(key=f"gantt_form_{tid}"):
+                        fe1, fe2 = st.columns(2)
+                        fe_title    = fe1.text_input("Title", value=t["title"], key=f"gt_{tid}")
+                        fe_category = fe2.text_input("Category", value=t.get("category","") or "", key=f"gcat_{tid}")
+
+                        fe3, fe4, fe5 = st.columns(3)
+                        cur_assignee = t.get("assignee","") or ""
+                        a_opts = [""] + TEAM_MEMBERS
+                        a_idx  = a_opts.index(cur_assignee) if cur_assignee in a_opts else 0
+                        fe_assignee = fe3.selectbox("Assignee", a_opts, index=a_idx, key=f"ga_{tid}")
+                        fe_start    = fe4.date_input("Start", value=t_start, key=f"gs_{tid}")
+                        fe_end      = fe5.date_input("End",   value=t_end,   key=f"ge_{tid}")
+
+                        fe6, fe7 = st.columns(2)
+                        s_idx  = GANTT_STATUS_OPTIONS.index(t_status) if t_status in GANTT_STATUS_OPTIONS else 0
+                        fe_status = fe6.selectbox("Status", GANTT_STATUS_OPTIONS, index=s_idx, key=f"gst_{tid}")
+
+                        # Dependency multiselect — exclude self
+                        dep_opts  = {str(x["id"]): f"#{x['id']} — {x['title'][:45]}"
+                                     for x in tasks if x["id"] != tid}
+                        cur_deps  = [d.strip() for d in str(t.get("dependencies") or "").split(",") if d.strip()]
+                        valid_cur_deps = [d for d in cur_deps if d in dep_opts]
+                        fe_deps   = fe7.multiselect(
+                            "Depends on",
+                            options=list(dep_opts.keys()),
+                            default=valid_cur_deps,
+                            format_func=lambda x: dep_opts.get(x, x),
+                            key=f"gdep_{tid}",
+                        )
+                        fe_notes = st.text_area("Notes", value=t.get("notes","") or "", height=60, key=f"gn_{tid}")
+
+                        bf1, bf2, _ = st.columns([1, 1, 4])
+                        do_save_t = bf1.form_submit_button("Save",   type="primary", use_container_width=True)
+                        do_del_t  = bf2.form_submit_button("Delete", type="secondary", use_container_width=True)
+
+                    if do_save_t:
+                        if fe_end < fe_start:
+                            st.warning("End date must be on or after start date.")
+                        else:
+                            try:
+                                update_gantt_task(tid, {
+                                    "title":        fe_title,
+                                    "assignee":     fe_assignee,
+                                    "start_date":   fe_start,
+                                    "end_date":     fe_end,
+                                    "status":       fe_status,
+                                    "dependencies": ",".join(fe_deps),
+                                    "category":     fe_category,
+                                    "notes":        fe_notes,
+                                })
+                                st.success(f"Task #{tid} updated.")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+                    if do_del_t:
+                        try:
+                            delete_gantt_task(tid)
+                            st.warning(f"Task #{tid} deleted.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")

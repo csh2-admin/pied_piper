@@ -516,3 +516,144 @@ def run_read_query(sql: str) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ── Gantt Tasks ───────────────────────────────────────────────────────────────
+
+CREATE_GANTT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS gantt_tasks (
+    id              BIGSERIAL PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    title           TEXT NOT NULL,
+    assignee        TEXT,
+    start_date      DATE NOT NULL,
+    end_date        DATE NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'Not Started',
+    dependencies    TEXT,        -- comma-separated task IDs, e.g. '1,3'
+    action_item_id  BIGINT,      -- optional soft-link to action_items.id
+    notes           TEXT,
+    category        TEXT         -- swimlane / grouping label
+);
+"""
+
+INSERT_GANTT_SQL = """
+INSERT INTO gantt_tasks
+    (title, assignee, start_date, end_date, status, dependencies,
+     action_item_id, notes, category)
+VALUES
+    (%(title)s, %(assignee)s, %(start_date)s, %(end_date)s, %(status)s,
+     %(dependencies)s, %(action_item_id)s, %(notes)s, %(category)s)
+RETURNING id, created_at;
+"""
+
+UPDATE_GANTT_SQL = """
+UPDATE gantt_tasks SET
+    title          = %(title)s,
+    assignee       = %(assignee)s,
+    start_date     = %(start_date)s,
+    end_date       = %(end_date)s,
+    status         = %(status)s,
+    dependencies   = %(dependencies)s,
+    notes          = %(notes)s,
+    category       = %(category)s,
+    updated_at     = NOW()
+WHERE id = %(id)s
+RETURNING id, updated_at;
+"""
+
+DELETE_GANTT_SQL = "DELETE FROM gantt_tasks WHERE id = %(id)s;"
+
+FETCH_GANTT_SQL = """
+SELECT id, created_at, updated_at, title, assignee,
+       start_date, end_date, status, dependencies,
+       action_item_id, notes, category
+FROM gantt_tasks
+ORDER BY start_date ASC, id ASC;
+"""
+
+
+def ensure_gantt_schema():
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(CREATE_GANTT_TABLE_SQL)
+    finally:
+        conn.close()
+
+
+def fetch_gantt_tasks() -> list[dict]:
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_GANTT_SQL)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _gantt_params(fields: dict) -> dict:
+    return {
+        "title":          fields.get("title", "").strip(),
+        "assignee":       fields.get("assignee", "") or "",
+        "start_date":     fields.get("start_date"),
+        "end_date":       fields.get("end_date"),
+        "status":         fields.get("status", "Not Started"),
+        "dependencies":   fields.get("dependencies", "") or "",
+        "action_item_id": fields.get("action_item_id") or None,
+        "notes":          fields.get("notes", "") or "",
+        "category":       fields.get("category", "") or "",
+    }
+
+
+def create_gantt_task(fields: dict) -> dict:
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(INSERT_GANTT_SQL, _gantt_params(fields))
+                row_id, created_at = cur.fetchone()
+        return {"id": row_id, "created_at": created_at}
+    finally:
+        conn.close()
+
+
+def update_gantt_task(task_id: int, fields: dict) -> dict:
+    params = _gantt_params(fields)
+    params["id"] = task_id
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(UPDATE_GANTT_SQL, params)
+                row_id, updated_at = cur.fetchone()
+        return {"id": row_id, "updated_at": updated_at}
+    finally:
+        conn.close()
+
+
+def delete_gantt_task(task_id: int):
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(DELETE_GANTT_SQL, {"id": task_id})
+    finally:
+        conn.close()
+
+
+def bulk_insert_gantt_tasks(task_list: list[dict]) -> list[dict]:
+    """Insert multiple tasks at once, used when Claude generates a plan."""
+    conn = _connect()
+    created = []
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                for fields in task_list:
+                    cur.execute(INSERT_GANTT_SQL, _gantt_params(fields))
+                    row_id, created_at = cur.fetchone()
+                    created.append({"id": row_id, "title": fields.get("title")})
+    finally:
+        conn.close()
+    return created
