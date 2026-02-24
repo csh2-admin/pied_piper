@@ -1220,7 +1220,7 @@ elif page == "Gantt":
         )
         # Today marker
         fig.add_vline(
-            x=pd.Timestamp(date.today()),
+            x=date.today().isoformat(),
             line_color="#c9a84c", line_width=1, line_dash="dash",
             annotation_text="TODAY",
             annotation_font=dict(color="#c9a84c", size=9, family="Share Tech Mono"),
