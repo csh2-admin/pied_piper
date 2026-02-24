@@ -7,7 +7,6 @@ TimescaleDB Cloud (tsdb.cloud) and self-hosted TimescaleDB.
 Example DB_URI formats:
   TimescaleDB Cloud: postgres://tsdbadmin:password@host.tsdb.cloud:12345/tsdb
   Self-hosted:       postgresql://user:password@localhost:5432/mydb
-  commenting
 """
 
 import json
@@ -454,6 +453,66 @@ def fetch_action_items(engineer="", status="", search="") -> list[dict]:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(FETCH_ACTIONS_SQL, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ── Natural language query support ───────────────────────────────────────────
+
+# Schema description passed to Claude so it can write accurate SQL
+DB_SCHEMA = """
+You have access to two PostgreSQL (TimescaleDB) tables:
+
+TABLE: memo_log
+  id                  BIGINT          -- unique row ID
+  logged_at           TIMESTAMPTZ     -- when the entry was saved (UTC)
+  engineer            TEXT            -- who logged it (e.g. 'PJ Callahan')
+  source_file         TEXT            -- audio filename or 'Live Recording'
+  activity_type       TEXT            -- 'Regular Maintenance' | 'Unplanned Maintenance' | 'Technical Milestone' | 'Logistics' | 'Other'
+  summary             TEXT            -- 1-2 sentence summary of the entry
+  system_performance  TEXT            -- observations about system behaviour
+  maintenance_done    TEXT            -- maintenance activities completed
+  issues_found        TEXT            -- problems or unexpected behaviours
+  action_items        TEXT            -- follow-up tasks
+  components_affected TEXT            -- parts or subsystems mentioned
+  duration_hours      NUMERIC         -- time spent (may be NULL)
+  severity            TEXT            -- 'Critical' | 'High' | 'Medium' | 'Low' | 'None'
+  additional_notes    TEXT
+  raw_transcript      TEXT            -- full verbatim transcript
+
+TABLE: action_items
+  id           BIGINT
+  created_at   TIMESTAMPTZ
+  updated_at   TIMESTAMPTZ
+  memo_id      BIGINT                 -- references memo_log.id (may be NULL)
+  engineer     TEXT
+  action_text  TEXT                   -- the action item description
+  status       TEXT                   -- 'Not Started' | 'In Progress' | 'Complete'
+  responsible  TEXT                   -- person responsible
+  due_date     DATE
+  notes        TEXT
+"""
+
+def run_read_query(sql: str) -> list[dict]:
+    """
+    Execute a read-only SELECT query and return results as list of dicts.
+    Raises ValueError if the SQL contains write operations.
+    """
+    # Safety: only allow SELECT statements
+    normalised = sql.strip().lstrip("(").upper()
+    if not normalised.startswith("SELECT") and not normalised.startswith("WITH"):
+        raise ValueError("Only SELECT queries are permitted.")
+    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
+                 "CREATE", "GRANT", "REVOKE"]
+    for word in forbidden:
+        if word in normalised:
+            raise ValueError(f"Query contains forbidden keyword: {word}")
+
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
