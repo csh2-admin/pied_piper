@@ -286,6 +286,73 @@ ACTIVITY_OPTIONS = [
     "Other",
 ]
 
+# ── Pinocchio loading animation (Ask Claude) ──────────────────────────────────
+PINOCCHIO_HTML = """
+<div style="display:flex;align-items:center;padding:24px 0 16px 0;gap:0;">
+<style>
+@keyframes grow-nose {
+  0%   { width: 8px; }
+  100% { width: min(580px, 55vw); }
+}
+@keyframes blink {
+  0%,88%,100% { transform:scaleY(1); }
+  93%         { transform:scaleY(0.08); }
+}
+@keyframes label-pulse {
+  0%,100% { opacity:0.3; } 50% { opacity:1; }
+}
+.pin-face {
+  position:relative; width:52px; height:52px;
+  background:#111318; border-radius:50%;
+  border:1.5px solid #c9a84c; flex-shrink:0; z-index:2;
+}
+.pin-eye {
+  position:absolute; width:5px; height:5px;
+  background:#c9a84c; border-radius:50%; top:14px;
+  animation:blink 3.2s ease-in-out infinite;
+  transform-origin:center 2.5px;
+}
+.pin-eye.l { left:12px; } .pin-eye.r { left:30px; }
+.pin-mouth {
+  position:absolute; bottom:10px; left:50%;
+  transform:translateX(-50%);
+  width:16px; height:5px;
+  border-bottom:2px solid #c9a84c;
+  border-radius:0 0 8px 8px;
+}
+.pin-nose-row {
+  display:flex; align-items:center; flex:1; height:12px; margin-top:-1px;
+}
+.pin-nose {
+  height:4px;
+  background:linear-gradient(90deg,#6b4f1a,#c9a84c);
+  animation:grow-nose 2.8s cubic-bezier(.4,0,.2,1) infinite alternate;
+  box-shadow:0 0 8px #c9a84c44;
+}
+.pin-tip {
+  width:9px; height:9px; background:#c9a84c;
+  border-radius:50%; flex-shrink:0; margin-left:-1px;
+  box-shadow:0 0 10px #c9a84c99;
+}
+.pin-label {
+  font-family:'Share Tech Mono',monospace; font-size:0.68rem;
+  letter-spacing:0.14em; color:#5a6070; margin-left:18px;
+  flex-shrink:0; animation:label-pulse 1.4s ease-in-out infinite;
+}
+</style>
+<div class="pin-face">
+  <div class="pin-eye l"></div>
+  <div class="pin-eye r"></div>
+  <div class="pin-mouth"></div>
+</div>
+<div class="pin-nose-row">
+  <div class="pin-nose"></div>
+  <div class="pin-tip"></div>
+</div>
+<div class="pin-label">QUERYING DATABASE...</div>
+</div>
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session state
@@ -964,14 +1031,15 @@ elif page == "Ask Claude":
             st.write(question)
 
         with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("Claude is querying your database…"):
-                try:
-                    from db_logger import DB_SCHEMA, run_read_query
+            _pin = st.empty()
+            _pin.markdown(PINOCCHIO_HTML, unsafe_allow_html=True)
+            try:
+                from db_logger import DB_SCHEMA, run_read_query
 
-                    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-                    # ── Step 1: Ask Claude to write a SQL query ───────────────
-                    sql_system = f"""You are a SQL expert assistant for a hardware test team.
+                # ── Step 1: Ask Claude to write a SQL query ───────────────
+                sql_system = f"""You are a SQL expert assistant for a hardware test team.
 Your job is to translate natural language questions into PostgreSQL SELECT queries.
 
 {DB_SCHEMA}
@@ -987,95 +1055,97 @@ Rules:
 - For "recent" without a specific timeframe, use the last 90 days.
 - Return only the SQL query, nothing else."""
 
-                    sql_response = client.messages.create(
-                        model=CLAUDE_MODEL,
-                        max_tokens=512,
-                        system=sql_system,
-                        messages=[{"role": "user", "content": question}],
-                    )
-                    raw_sql = sql_response.content[0].text.strip()
+                sql_response = client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=512,
+                    system=sql_system,
+                    messages=[{"role": "user", "content": question}],
+                )
+                raw_sql = sql_response.content[0].text.strip()
 
-                    # Strip markdown fences if Claude added them anyway
-                    if raw_sql.startswith("```"):
-                        raw_sql = raw_sql.split("```")[1]
-                        if raw_sql.lower().startswith("sql"):
-                            raw_sql = raw_sql[3:]
-                        raw_sql = raw_sql.strip()
+                # Strip markdown fences if Claude added them anyway
+                if raw_sql.startswith("```"):
+                    raw_sql = raw_sql.split("```")[1]
+                    if raw_sql.lower().startswith("sql"):
+                        raw_sql = raw_sql[3:]
+                    raw_sql = raw_sql.strip()
 
-                    # ── Step 2: Run the query ─────────────────────────────────
-                    rows = run_read_query(raw_sql)
+                # ── Step 2: Run the query ─────────────────────────────────
+                rows = run_read_query(raw_sql)
 
-                    # ── Step 3: Ask Claude to summarise the results ───────────
-                    # Serialize rows for Claude — truncate very large result sets
-                    MAX_ROWS_FOR_SUMMARY = 50
-                    rows_for_summary = rows[:MAX_ROWS_FOR_SUMMARY]
+                # ── Step 3: Ask Claude to summarise the results ───────────
+                # Serialize rows for Claude — truncate very large result sets
+                MAX_ROWS_FOR_SUMMARY = 50
+                rows_for_summary = rows[:MAX_ROWS_FOR_SUMMARY]
 
-                    # Convert dates/datetimes to strings for JSON serialisation
-                    def _serialise(obj):
-                        if hasattr(obj, "isoformat"):
-                            return obj.isoformat()
-                        return str(obj)
+                # Convert dates/datetimes to strings for JSON serialisation
+                def _serialise(obj):
+                    if hasattr(obj, "isoformat"):
+                        return obj.isoformat()
+                    return str(obj)
 
-                    rows_json = json.dumps(rows_for_summary, default=_serialise, indent=2)
-                    truncation_note = (
-                        f"\n(Showing first {MAX_ROWS_FOR_SUMMARY} of {len(rows)} total rows.)"
-                        if len(rows) > MAX_ROWS_FOR_SUMMARY else ""
-                    )
+                rows_json = json.dumps(rows_for_summary, default=_serialise, indent=2)
+                truncation_note = (
+                    f"\n(Showing first {MAX_ROWS_FOR_SUMMARY} of {len(rows)} total rows.)"
+                    if len(rows) > MAX_ROWS_FOR_SUMMARY else ""
+                )
 
-                    summary_system = """You are a helpful assistant summarising database query results 
+                summary_system = """You are a helpful assistant summarising database query results 
 for a hardware test engineering team. Be concise and specific. 
 Highlight the most important findings. Use bullet points for lists of items.
 If the result is empty, say so clearly and suggest why the search may have returned nothing.
 Do not mention SQL or databases in your response — just answer the question naturally."""
 
-                    summary_prompt = (
-                        f"The engineer asked: \"{question}\"\n\n"
-                        f"The query returned {len(rows)} result(s){truncation_note}:\n\n"
-                        f"{rows_json if rows else '(no results)'}\n\n"
-                        f"Please answer the engineer's question based on these results."
-                    )
+                summary_prompt = (
+                    f"The engineer asked: \"{question}\"\n\n"
+                    f"The query returned {len(rows)} result(s){truncation_note}:\n\n"
+                    f"{rows_json if rows else '(no results)'}\n\n"
+                    f"Please answer the engineer's question based on these results."
+                )
 
-                    summary_response = client.messages.create(
-                        model=CLAUDE_MODEL,
-                        max_tokens=1024,
-                        system=summary_system,
-                        messages=[{"role": "user", "content": summary_prompt}],
-                    )
-                    answer = summary_response.content[0].text.strip()
+                summary_response = client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=1024,
+                    system=summary_system,
+                    messages=[{"role": "user", "content": summary_prompt}],
+                )
+                answer = summary_response.content[0].text.strip()
 
-                    # Display answer
-                    st.write(answer)
-                    if raw_sql:
-                        with st.expander("🔍  SQL query used", expanded=False):
-                            st.code(raw_sql, language="sql")
-                    if rows:
-                        with st.expander(f"📋  Raw results ({len(rows)} row{'s' if len(rows)!=1 else ''})", expanded=False):
-                            import pandas as pd
-                            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                    elif rows is not None:
-                        st.caption("_Query returned no rows._")
+                # Display answer
+                st.write(answer)
+                if raw_sql:
+                    with st.expander("🔍  SQL query used", expanded=False):
+                        st.code(raw_sql, language="sql")
+                if rows:
+                    with st.expander(f"📋  Raw results ({len(rows)} row{'s' if len(rows)!=1 else ''})", expanded=False):
+                        import pandas as pd
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                elif rows is not None:
+                    st.caption("_Query returned no rows._")
 
-                    # Save to history
-                    st.session_state.chat_history.append({
-                        "role":    "assistant",
-                        "content": answer,
-                        "sql":     raw_sql,
-                        "rows":    rows,
-                    })
+                # Save to history
+                st.session_state.chat_history.append({
+                    "role":    "assistant",
+                    "content": answer,
+                    "sql":     raw_sql,
+                    "rows":    rows,
+                })
 
-                except ValueError as e:
-                    # SQL safety rejection
-                    msg = f"I wasn't able to run that query safely: {e}"
-                    st.warning(msg)
-                    st.session_state.chat_history.append({
-                        "role": "assistant", "content": msg, "sql": None, "rows": None
-                    })
-                except Exception as e:
-                    msg = f"Something went wrong: {e}"
-                    st.error(msg)
-                    st.session_state.chat_history.append({
-                        "role": "assistant", "content": msg, "sql": None, "rows": None
-                    })
+            except ValueError as e:
+                _pin.empty()
+                # SQL safety rejection
+                msg = f"I wasn't able to run that query safely: {e}"
+                st.warning(msg)
+                st.session_state.chat_history.append({
+                    "role": "assistant", "content": msg, "sql": None, "rows": None
+                })
+            except Exception as e:
+                _pin.empty()
+                msg = f"Something went wrong: {e}"
+                st.error(msg)
+                st.session_state.chat_history.append({
+                    "role": "assistant", "content": msg, "sql": None, "rows": None
+                })
 
     # ── Clear chat ────────────────────────────────────────────────────────────
     if st.session_state.chat_history:
