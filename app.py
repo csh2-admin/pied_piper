@@ -488,7 +488,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["New Entry", "Records", "Actions", "Gantt", "Ask Claude"],
+        ["New Entry", "Records", "Actions", "Gantt", "Ask Weebo"],
         label_visibility="collapsed",
     )
 
@@ -961,15 +961,15 @@ elif page == "Actions":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE: ASK CLAUDE
+# PAGE: ASK WEEBO
 # ─────────────────────────────────────────────────────────────────────────────
-elif page == "Ask Claude":
+elif page == "Ask Weebo":
 
     import json
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
-    st.header("ASK CLAUDE")
+    st.header("ASK WEEBO")
     st.caption("Query your log database in plain English.")
 
     # ── Example prompts ───────────────────────────────────────────────────────
