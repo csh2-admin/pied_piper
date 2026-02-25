@@ -76,6 +76,25 @@ INSERT INTO memo_log (
 RETURNING id, logged_at;
 """
 
+INSERT_SQL_WITH_DATE = """
+INSERT INTO memo_log (
+    logged_at,
+    engineer, source_file, activity_type,
+    summary, system_performance, maintenance_done,
+    issues_found, action_items, components_affected,
+    duration_hours, severity, additional_notes,
+    raw_transcript, raw_insights_json
+) VALUES (
+    %(logged_at)s,
+    %(engineer)s, %(source_file)s, %(activity_type)s,
+    %(summary)s, %(system_performance)s, %(maintenance_done)s,
+    %(issues_found)s, %(action_items)s, %(components_affected)s,
+    %(duration_hours)s, %(severity)s, %(additional_notes)s,
+    %(raw_transcript)s, %(raw_insights_json)s
+)
+RETURNING id, logged_at;
+"""
+
 UPDATE_SQL = """
 UPDATE memo_log SET
     engineer            = %(engineer)s,
@@ -238,7 +257,8 @@ def _parse_duration(raw) -> float | None:
 
 
 def append_entry(insights: dict, raw_transcript: str,
-                 source_file: str, engineer: str) -> dict:
+                 source_file: str, engineer: str,
+                 logged_at=None) -> dict:
     row = {
         "engineer":            engineer,
         "source_file":         source_file,
@@ -255,13 +275,18 @@ def append_entry(insights: dict, raw_transcript: str,
         "raw_transcript":      raw_transcript,
         "raw_insights_json":   json.dumps(insights),
     }
+    if logged_at is not None:
+        row["logged_at"] = logged_at
+        sql = INSERT_SQL_WITH_DATE
+    else:
+        sql = INSERT_SQL
     conn = _connect()
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(INSERT_SQL, row)
-                row_id, logged_at = cur.fetchone()
-        return {"id": row_id, "logged_at": logged_at}
+                cur.execute(sql, row)
+                row_id, logged_at_out = cur.fetchone()
+        return {"id": row_id, "logged_at": logged_at_out}
     finally:
         conn.close()
 

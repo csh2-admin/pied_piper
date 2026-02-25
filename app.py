@@ -632,6 +632,21 @@ if page == "New Entry":
                     value=ins.get("additional_notes","") or "", height=75)
 
                 st.divider()
+                import datetime as _dt
+                dc1, dc2 = st.columns(2)
+                f_date = dc1.date_input(
+                    "Record Date",
+                    value=_dt.date.today(),
+                    help="Defaults to today. Change this to log a historical record.",
+                )
+                f_time = dc2.time_input(
+                    "Record Time (UTC)",
+                    value=_dt.time(0, 0),
+                    help="Time of day for the record (UTC). Defaults to midnight.",
+                    step=300,
+                )
+
+                st.divider()
                 sc1, sc2 = st.columns([1, 1])
                 do_save  = sc1.form_submit_button("💾  Save to Database",
                                                   type="primary",
@@ -655,13 +670,18 @@ if page == "New Entry":
                 }
                 with st.spinner("Saving…"):
                     try:
+                        import datetime as _dt
                         from db_logger import append_entry, ensure_schema
                         ensure_schema()
+                        custom_dt = _dt.datetime.combine(f_date, f_time).replace(
+                            tzinfo=_dt.timezone.utc
+                        )
                         result = append_entry(
                             edited,
                             st.session_state.transcript,
                             st.session_state.source_label or "Unknown",
                             engineer,
+                            logged_at=custom_dt,
                         )
                         ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
                         # Auto-create individual action item rows
