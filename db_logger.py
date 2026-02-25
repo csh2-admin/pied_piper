@@ -238,7 +238,8 @@ def _parse_duration(raw) -> float | None:
 
 
 def append_entry(insights: dict, raw_transcript: str,
-                 source_file: str, engineer: str) -> dict:
+                 source_file: str, engineer: str,
+                 logged_at=None) -> dict:
     row = {
         "engineer":            engineer,
         "source_file":         source_file,
@@ -254,6 +255,7 @@ def append_entry(insights: dict, raw_transcript: str,
         "additional_notes":    insights.get("additional_notes", ""),
         "raw_transcript":      raw_transcript,
         "raw_insights_json":   json.dumps(insights),
+        "logged_at":           logged_at,  # None → COALESCE to NOW()
     }
     conn = _connect()
     try:

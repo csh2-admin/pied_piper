@@ -286,7 +286,7 @@ ACTIVITY_OPTIONS = [
     "Other",
 ]
 
-# ── Pinocchio loading animation (Ask Claude) ──────────────────────────────────
+# ── Pinocchio loading animation (Ask Weebo) ───────────────────────────────────
 PINOCCHIO_HTML = """
 <div style="display:flex;align-items:center;padding:24px 0 16px 0;gap:0;">
 <style>
@@ -571,12 +571,12 @@ if page == "New Entry":
 
     # ── Step 3: Extract ───────────────────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("STEP 3 — EXTRACT WITH CLAUDE")
+        st.subheader("STEP 3 — EXTRACT WITH WEEBO")
 
         if st.button("✨  Extract Insights",
                      disabled=not st.session_state.transcript.strip(),
                      type="primary"):
-            with st.spinner("Sending to Claude…"):
+            with st.spinner("Sending to Weebo…"):
                 try:
                     from extractor import extract_insights
                     st.session_state.insights = extract_insights(st.session_state.transcript)
@@ -632,6 +632,14 @@ if page == "New Entry":
                     value=ins.get("additional_notes","") or "", height=75)
 
                 st.divider()
+                dc1, dc2 = st.columns([1, 2])
+                f_date_recorded = dc1.date_input(
+                    "Date Recorded",
+                    value=None,
+                    help="Leave blank to use today's date. Set a past date to log a historical entry.",
+                    key="date_recorded",
+                )
+                dc2.caption("Leave blank to record as today. Set a past date for historical entries.")
                 sc1, sc2 = st.columns([1, 1])
                 do_save  = sc1.form_submit_button("💾  Save to Database",
                                                   type="primary",
@@ -662,6 +670,7 @@ if page == "New Entry":
                             st.session_state.transcript,
                             st.session_state.source_label or "Unknown",
                             engineer,
+                            logged_at=f_date_recorded,  # None → NOW() in DB
                         )
                         ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
                         # Auto-create individual action item rows
@@ -961,7 +970,7 @@ elif page == "Actions":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE: ASK WEEBO
+# PAGE: ASK CLAUDE
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "Ask Weebo":
 
@@ -970,7 +979,7 @@ elif page == "Ask Weebo":
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     st.header("ASK WEEBO")
-    st.caption("Query your log database in plain English.")
+    st.caption("Ask Weebo anything about your log database.")
 
     # ── Example prompts ───────────────────────────────────────────────────────
     with st.expander("💡  Example questions", expanded=False):
@@ -1312,11 +1321,11 @@ elif page == "Gantt":
     st.divider()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SYNC FROM ACTION ITEMS (Claude)
+    # SYNC FROM ACTION ITEMS (Weebo)
     # ─────────────────────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("SYNC FROM ACTION ITEMS")
-        st.caption("Claude reads your open action items and proposes Gantt tasks with estimated dates and dependencies.")
+        st.caption("Weebo reads your open action items and proposes Gantt tasks with estimated dates and dependencies.")
 
         sc1, sc2 = st.columns([3, 1])
         anchor_date = sc1.date_input(
@@ -1328,7 +1337,7 @@ elif page == "Gantt":
                              use_container_width=True, key="gantt_sync")
 
         if do_sync:
-            with st.spinner("Claude is reading your action items and building a schedule…"):
+            with st.spinner("Weebo is reading your action items and building a schedule…"):
                 try:
                     action_rows = fetch_action_items()
                     open_items  = [a for a in action_rows
@@ -1440,7 +1449,7 @@ Return only the JSON array of task objects."""
                         st.rerun()
 
                 except json.JSONDecodeError as e:
-                    st.error(f"Claude returned invalid JSON: {e}\n\nTry again.")
+                    st.error(f"Weebo returned invalid JSON: {e}\n\nTry again.")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
