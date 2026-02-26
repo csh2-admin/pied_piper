@@ -365,6 +365,7 @@ for k, v in {
     "audio_suffix": ".wav",
     "chat_history": [],   # list of {"role": "user"|"assistant", "content": str, "sql": str|None, "rows": list|None}
     "structured_insights": None,   # output from extract_structured()
+    "review_items": [],         # flat list of items for Step 4 review
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -405,6 +406,61 @@ def _load_actions(eng, status, search):
         search   = search or "",
     )
 
+
+
+
+REVIEW_CATEGORIES = ["Maintenance", "Observation", "Performance", "Action Item"]
+
+def _to_flat_items(structured):
+    """Flatten the 4-category structured dict into a single list for review."""
+    items = []
+    for r in structured.get("maintenance_performed", []):
+        items.append({**r, "_category": "Maintenance",
+                      "_text": r.get("activity_performed", "")})
+    for r in structured.get("qualitative_observations", []):
+        items.append({**r, "_category": "Observation",
+                      "_text": r.get("observation", "")})
+    for r in structured.get("system_performance", []):
+        label = r.get("metric_name", "")
+        if r.get("metric_value") is not None:
+            label += f" = {r['metric_value']} {r.get('metric_unit') or ''}".rstrip()
+        elif r.get("metric_narrative"):
+            label = r["metric_narrative"]
+        items.append({**r, "_category": "Performance", "_text": label})
+    for r in structured.get("action_items", []):
+        items.append({**r, "_category": "Action Item",
+                      "_text": r.get("action_text", "")})
+    return items
+
+
+def _from_flat_items(items):
+    """Re-assemble flat review list back into structured dict for process_transcript."""
+    out = {
+        "maintenance_performed":    [],
+        "qualitative_observations": [],
+        "system_performance":       [],
+        "action_items":             [],
+    }
+    for item in items:
+        cat = item.get("_category", "Observation")
+        # Strip internal keys before storing
+        r = {k: v for k, v in item.items() if not k.startswith("_")}
+        if cat == "Maintenance":
+            # Ensure required field present
+            if "_text" in item:
+                r["activity_performed"] = r.get("activity_performed") or item["_text"]
+            out["maintenance_performed"].append(r)
+        elif cat == "Observation":
+            if "_text" in item:
+                r["observation"] = r.get("observation") or item["_text"]
+            out["qualitative_observations"].append(r)
+        elif cat == "Performance":
+            out["system_performance"].append(r)
+        elif cat == "Action Item":
+            if "_text" in item:
+                r["action_text"] = r.get("action_text") or item["_text"]
+            out["action_items"].append(r)
+    return out
 
 def _clear_entry():
     st.session_state.transcript   = ""
@@ -580,199 +636,228 @@ if page == "New Entry":
             with st.spinner("Sending to Weebo…"):
                 try:
                     from extractor import extract_structured
-                    st.session_state.structured_insights = extract_structured(
-                        st.session_state.transcript
-                    )
+                    structured = extract_structured(st.session_state.transcript)
+                    st.session_state.structured_insights = structured
+                    st.session_state.review_items = _to_flat_items(structured)
                     st.success("Extraction complete — review and edit below before saving.")
                 except Exception as e:
                     st.error(f"Extraction error: {e}")
 
-        if st.session_state.structured_insights:
-            s = st.session_state.structured_insights
+        if st.session_state.review_items:
+            items = st.session_state.review_items
+            counts = {c: sum(1 for x in items if x["_category"] == c) for c in REVIEW_CATEGORIES}
             mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Maintenance",  len(s.get("maintenance_performed",[])))
-            mc2.metric("Observations", len(s.get("qualitative_observations",[])))
-            mc3.metric("Performance",  len(s.get("system_performance",[])))
-            mc4.metric("Action Items", len(s.get("action_items",[])))
+            mc1.metric("Maintenance",  counts["Maintenance"])
+            mc2.metric("Observations", counts["Observation"])
+            mc3.metric("Performance",  counts["Performance"])
+            mc4.metric("Action Items", counts["Action Item"])
+            s = st.session_state.structured_insights or {}
             if s.get("unmatched_components"):
                 st.warning(
-                    "⚠️ Unmatched components (not in registry): "
+                    "⚠️ Unmatched components: "
                     + ", ".join(s["unmatched_components"])
                     + " — go to Components page to register them.",
-                    icon="⚠️"
+                    icon="⚠️",
                 )
-            if s.get("_parse_error"):
-                st.error(f"Partial parse error — some data may be missing. Raw: {s['_parse_error']}")
 
     # ── Step 4: Review, Edit & Save ───────────────────────────────────────────
     with st.container(border=True):
         st.subheader("STEP 4 — REVIEW, EDIT & SAVE")
 
-        if not st.session_state.structured_insights:
+        if not st.session_state.review_items:
             st.caption("Extract insights first to unlock this section.")
         else:
-            import pandas as pd
-            s = st.session_state.structured_insights
+            # Load component list once for all dropdowns
+            try:
+                from db_logger import fetch_components
+                _comp_rows = fetch_components()
+                _comp_names = [""] + [r["canonical_name"] for r in _comp_rows]
+            except Exception:
+                _comp_rows  = []
+                _comp_names = [""]
 
-            # Date + save controls at top
-            with st.form("save_form_top"):
-                dc1, dc2 = st.columns([1, 2])
-                f_date_recorded = dc1.date_input(
-                    "Date Recorded",
-                    value=None,
-                    help="Leave blank for today. Set a past date for historical entries.",
-                    key="date_recorded",
-                )
-                dc2.caption("Leave blank to record as today. Set a past date for historical entries.")
-                sc1, sc2 = st.columns([1, 1])
-                do_save  = sc1.form_submit_button("💾  Save All to Database",
-                                                  type="primary", use_container_width=True)
-                do_clear = sc2.form_submit_button("🗑  Clear", use_container_width=True)
+            # Date + save controls
+            s4c1, s4c2, s4c3 = st.columns([2, 1, 1])
+            f_date_recorded = s4c1.date_input(
+                "Date Recorded",
+                value=None,
+                help="Leave blank for today. Set a past date for historical entries.",
+                key="date_recorded",
+            )
+            do_save  = s4c2.button("💾  Save All", type="primary", use_container_width=True, key="do_save_s4")
+            do_clear = s4c3.button("🗑  Clear",    use_container_width=True, key="do_clear_s4")
 
             st.divider()
 
-            # ── Maintenance ───────────────────────────────────────────────────
-            maint_rows = s.get("maintenance_performed", [])
-            with st.expander(f"🔧  MAINTENANCE  ({len(maint_rows)} item{'s' if len(maint_rows)!=1 else ''})", expanded=True):
-                if maint_rows:
-                    maint_df = pd.DataFrame([{
-                        "component":  r.get("component_canonical") or r.get("component_raw",""),
-                        "activity":   r.get("activity_performed",""),
-                        "hours":      r.get("duration_hours"),
-                        "severity":   r.get("severity","None"),
-                        "outcome":    r.get("outcome") or "",
-                    } for r in maint_rows])
-                    edited_maint = st.data_editor(
-                        maint_df,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "severity": st.column_config.SelectboxColumn(
-                                "Severity", options=SEVERITY_OPTIONS),
-                            "outcome": st.column_config.SelectboxColumn(
-                                "Outcome", options=["resolved","monitoring","escalated",""]),
-                            "hours": st.column_config.NumberColumn("Hours", min_value=0, step=0.25),
-                        },
-                        key="maint_editor",
-                    )
-                    # Write edits back to session state
-                    for i, row in edited_maint.iterrows():
-                        if i < len(s["maintenance_performed"]):
-                            s["maintenance_performed"][i]["activity_performed"] = row["activity"]
-                            s["maintenance_performed"][i]["duration_hours"]     = row["hours"]
-                            s["maintenance_performed"][i]["severity"]           = row["severity"]
-                            s["maintenance_performed"][i]["outcome"]            = row["outcome"] or None
-                else:
-                    st.caption("No maintenance activities extracted.")
+            # ── Per-item review cards ─────────────────────────────────────────
+            items = st.session_state.review_items
+            to_delete = []
 
-            # ── Observations ──────────────────────────────────────────────────
-            obs_rows = s.get("qualitative_observations", [])
-            with st.expander(f"👁  OBSERVATIONS  ({len(obs_rows)} item{'s' if len(obs_rows)!=1 else ''})", expanded=True):
-                if obs_rows:
-                    obs_df = pd.DataFrame([{
-                        "component":       r.get("component_canonical") or r.get("component_raw",""),
-                        "observation":     r.get("observation",""),
-                        "type":            r.get("observation_type","informational"),
-                        "severity":        r.get("severity","None"),
-                        "follow_up":       bool(r.get("follow_up_required", False)),
-                    } for r in obs_rows])
-                    edited_obs = st.data_editor(
-                        obs_df,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "type": st.column_config.SelectboxColumn(
-                                "Type", options=["anomaly","degradation","normal","informational","concern"]),
-                            "severity": st.column_config.SelectboxColumn(
-                                "Severity", options=SEVERITY_OPTIONS),
-                            "follow_up": st.column_config.CheckboxColumn("Follow Up?"),
-                        },
-                        key="obs_editor",
-                    )
-                    for i, row in edited_obs.iterrows():
-                        if i < len(s["qualitative_observations"]):
-                            s["qualitative_observations"][i]["observation"]       = row["observation"]
-                            s["qualitative_observations"][i]["observation_type"]  = row["type"]
-                            s["qualitative_observations"][i]["severity"]          = row["severity"]
-                            s["qualitative_observations"][i]["follow_up_required"]= bool(row["follow_up"])
-                else:
-                    st.caption("No observations extracted.")
+            for idx, item in enumerate(items):
+                cat    = item.get("_category", "Observation")
+                text   = item.get("_text", "")
+                comp_c = item.get("component_canonical") or ""
+                comp_r = item.get("component_raw") or ""
+                comp_display = comp_c or comp_r or "—"
 
-            # ── System Performance ────────────────────────────────────────────
-            perf_rows = s.get("system_performance", [])
-            with st.expander(f"📊  SYSTEM PERFORMANCE  ({len(perf_rows)} item{'s' if len(perf_rows)!=1 else ''})", expanded=True):
-                if perf_rows:
-                    perf_df = pd.DataFrame([{
-                        "component":  r.get("component_canonical") or r.get("component_raw",""),
-                        "metric":     r.get("metric_name",""),
-                        "value":      r.get("metric_value"),
-                        "unit":       r.get("metric_unit") or "",
-                        "narrative":  r.get("metric_narrative") or "",
-                        "in_spec":    r.get("within_spec"),
-                        "anomaly":    bool(r.get("anomaly_flag", False)),
-                    } for r in perf_rows])
-                    edited_perf = st.data_editor(
-                        perf_df,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "value":   st.column_config.NumberColumn("Value"),
-                            "in_spec": st.column_config.CheckboxColumn("In Spec?"),
-                            "anomaly": st.column_config.CheckboxColumn("Anomaly?"),
-                        },
-                        key="perf_editor",
-                    )
-                    for i, row in edited_perf.iterrows():
-                        if i < len(s["system_performance"]):
-                            s["system_performance"][i]["metric_name"]    = row["metric"]
-                            s["system_performance"][i]["metric_value"]   = row["value"]
-                            s["system_performance"][i]["metric_unit"]    = row["unit"] or None
-                            s["system_performance"][i]["metric_narrative"]= row["narrative"] or None
-                            s["system_performance"][i]["within_spec"]    = row["in_spec"]
-                            s["system_performance"][i]["anomaly_flag"]   = bool(row["anomaly"])
-                else:
-                    st.caption("No performance metrics extracted.")
+                CAT_ICON = {
+                    "Maintenance": "🔧",
+                    "Observation": "👁",
+                    "Performance": "📊",
+                    "Action Item": "✅",
+                }
+                icon = CAT_ICON.get(cat, "•")
+                exp_label = f"{icon}  **[{cat}]**  {text[:80]}{'…' if len(text)>80 else ''}  ·  _{comp_display}_"
 
-            # ── Action Items ──────────────────────────────────────────────────
-            ai_rows = s.get("action_items", [])
-            with st.expander(f"✅  ACTION ITEMS  ({len(ai_rows)} item{'s' if len(ai_rows)!=1 else ''})", expanded=True):
-                if ai_rows:
-                    ai_df = pd.DataFrame([{
-                        "action":       r.get("action_text",""),
-                        "responsible":  r.get("responsible") or "",
-                        "due_date":     r.get("due_date") or None,
-                        "time_ref":     r.get("time_reference") or "",
-                    } for r in ai_rows])
-                    edited_ai = st.data_editor(
-                        ai_df,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "due_date": st.column_config.DateColumn("Due Date"),
-                            "responsible": st.column_config.SelectboxColumn(
-                                "Responsible", options=[""] + TEAM_MEMBERS),
-                        },
-                        key="ai_editor",
-                    )
-                    for i, row in edited_ai.iterrows():
-                        if i < len(s["action_items"]):
-                            s["action_items"][i]["action_text"]  = row["action"]
-                            s["action_items"][i]["responsible"]  = row["responsible"] or None
-                            s["action_items"][i]["due_date"]     = row["due_date"]
-                else:
-                    st.caption("No action items extracted.")
+                with st.expander(exp_label, expanded=False):
+                    col_cat, col_comp = st.columns([1, 2])
 
-            # ── Save handler ──────────────────────────────────────────────────
+                    # Category selector
+                    cat_idx = REVIEW_CATEGORIES.index(cat) if cat in REVIEW_CATEGORIES else 0
+                    new_cat = col_cat.selectbox(
+                        "Category",
+                        REVIEW_CATEGORIES,
+                        index=cat_idx,
+                        key=f"cat_{idx}",
+                    )
+                    item["_category"] = new_cat
+
+                    # Component selector
+                    # Show canonical list; if current value not in list, add it as option
+                    comp_opts = list(_comp_names)
+                    cur_comp_val = comp_c  # use canonical if set
+                    if cur_comp_val and cur_comp_val not in comp_opts:
+                        comp_opts.append(cur_comp_val)
+                    comp_idx = comp_opts.index(cur_comp_val) if cur_comp_val in comp_opts else 0
+                    new_comp = col_comp.selectbox(
+                        "Component",
+                        comp_opts,
+                        index=comp_idx,
+                        key=f"comp_{idx}",
+                    )
+                    item["component_canonical"] = new_comp or None
+                    # Preserve raw if no canonical selected
+                    if not new_comp and comp_r:
+                        item["component_raw"] = comp_r
+
+                    # ── Category-specific fields ──────────────────────────────
+                    if new_cat == "Maintenance":
+                        f1, f2, f3 = st.columns([3, 1, 1])
+                        item["activity_performed"] = f1.text_area(
+                            "Activity Performed",
+                            value=item.get("activity_performed") or text,
+                            height=70,
+                            key=f"mact_{idx}",
+                        )
+                        item["_text"] = item["activity_performed"]
+                        sev_opts = SEVERITY_OPTIONS
+                        sev_i = sev_opts.index(item.get("severity","None")) if item.get("severity") in sev_opts else 4
+                        item["severity"] = f2.selectbox("Severity", sev_opts, index=sev_i, key=f"msev_{idx}")
+                        item["duration_hours"] = f3.number_input(
+                            "Hours", value=float(item.get("duration_hours") or 0),
+                            min_value=0.0, step=0.25, key=f"mdur_{idx}"
+                        ) or None
+                        out_opts = ["", "resolved", "monitoring", "escalated"]
+                        out_i = out_opts.index(item.get("outcome") or "") if (item.get("outcome") or "") in out_opts else 0
+                        item["outcome"] = st.selectbox("Outcome", out_opts, index=out_i, key=f"mout_{idx}") or None
+
+                    elif new_cat == "Observation":
+                        item["observation"] = st.text_area(
+                            "Observation",
+                            value=item.get("observation") or text,
+                            height=70,
+                            key=f"oobs_{idx}",
+                        )
+                        item["_text"] = item["observation"]
+                        oc1, oc2, oc3 = st.columns(3)
+                        type_opts = ["anomaly","degradation","normal","informational","concern"]
+                        type_i = type_opts.index(item.get("observation_type","informational")) if item.get("observation_type") in type_opts else 3
+                        item["observation_type"] = oc1.selectbox("Type", type_opts, index=type_i, key=f"otyp_{idx}")
+                        sev_i = SEVERITY_OPTIONS.index(item.get("severity","None")) if item.get("severity") in SEVERITY_OPTIONS else 4
+                        item["severity"] = oc2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_i, key=f"osev_{idx}")
+                        item["follow_up_required"] = oc3.checkbox("Follow Up Required",
+                            value=bool(item.get("follow_up_required", False)), key=f"ofu_{idx}")
+
+                    elif new_cat == "Performance":
+                        pc1, pc2, pc3 = st.columns([2, 1, 1])
+                        item["metric_name"] = pc1.text_input(
+                            "Metric",
+                            value=item.get("metric_name",""),
+                            key=f"pmn_{idx}",
+                        )
+                        item["_text"] = item["metric_name"]
+                        item["metric_value"] = pc2.number_input(
+                            "Value",
+                            value=float(item.get("metric_value") or 0),
+                            key=f"pmv_{idx}",
+                        ) or None
+                        item["metric_unit"] = pc3.text_input(
+                            "Unit",
+                            value=item.get("metric_unit") or "",
+                            key=f"pmu_{idx}",
+                        ) or None
+                        pc4, pc5, pc6 = st.columns(3)
+                        item["metric_narrative"] = pc4.text_input(
+                            "Narrative (if no numeric)",
+                            value=item.get("metric_narrative") or "",
+                            key=f"pnar_{idx}",
+                        ) or None
+                        item["within_spec"] = pc5.selectbox(
+                            "Within Spec",
+                            [None, True, False],
+                            index=[None, True, False].index(item.get("within_spec")),
+                            format_func=lambda x: "Unknown" if x is None else ("Yes" if x else "No"),
+                            key=f"pws_{idx}",
+                        )
+                        item["anomaly_flag"] = pc6.checkbox(
+                            "Anomaly", value=bool(item.get("anomaly_flag", False)), key=f"pan_{idx}"
+                        )
+
+                    elif new_cat == "Action Item":
+                        item["action_text"] = st.text_area(
+                            "Action",
+                            value=item.get("action_text") or text,
+                            height=70,
+                            key=f"aat_{idx}",
+                        )
+                        item["_text"] = item["action_text"]
+                        ac1, ac2 = st.columns(2)
+                        resp_opts = [""] + TEAM_MEMBERS
+                        resp_i = resp_opts.index(item.get("responsible") or "") if (item.get("responsible") or "") in resp_opts else 0
+                        item["responsible"] = ac1.selectbox("Responsible", resp_opts, index=resp_i, key=f"aresp_{idx}") or None
+                        item["due_date"] = ac2.date_input("Due Date", value=item.get("due_date"), key=f"adue_{idx}")
+                        if item.get("time_reference"):
+                            st.caption(f"Time reference: _{item['time_reference']}_")
+
+                    # Delete button
+                    if st.button("🗑  Remove this item", key=f"del_{idx}", use_container_width=False):
+                        to_delete.append(idx)
+
+            # Process deletions
+            if to_delete:
+                st.session_state.review_items = [
+                    x for i, x in enumerate(items) if i not in to_delete
+                ]
+                st.rerun()
+
+            # ── Save ─────────────────────────────────────────────────────────
             if do_save:
                 with st.spinner("Saving to all tables…"):
                     try:
                         from db_logger import process_transcript
+                        # Re-assemble structured from current review state
+                        final_structured = _from_flat_items(st.session_state.review_items)
+                        # Preserve unmatched from original extraction
+                        final_structured["unmatched_components"] = (
+                            st.session_state.structured_insights or {}
+                        ).get("unmatched_components", [])
+
                         result = process_transcript(
-                            structured   = st.session_state.structured_insights,
-                            raw_transcript = st.session_state.transcript,
-                            source_file  = st.session_state.source_label or "Unknown",
-                            engineer     = engineer,
-                            date_recorded= f_date_recorded,
+                            structured    = final_structured,
+                            raw_transcript= st.session_state.transcript,
+                            source_file   = st.session_state.source_label or "Unknown",
+                            engineer      = engineer,
+                            date_recorded = f_date_recorded,
                         )
                         msg = (
                             f"✅  Saved! Memo ID **{result['memo_id']}** — "
@@ -784,10 +869,11 @@ if page == "New Entry":
                         st.success(msg)
                         if result.get("unmatched_components"):
                             st.warning(
-                                "Unmatched components saved with no canonical link: "
+                                "Unmatched components saved without canonical link: "
                                 + ", ".join(result["unmatched_components"])
                             )
                         st.session_state.structured_insights = None
+                        st.session_state.review_items = []
                         _clear_entry()
                         st.cache_data.clear()
                         st.rerun()
@@ -796,35 +882,41 @@ if page == "New Entry":
 
             if do_clear:
                 st.session_state.structured_insights = None
+                st.session_state.review_items = []
                 _clear_entry()
                 st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PAGE: RECORDS# ─────────────────────────────────────────────────────────────────────────────
 # PAGE: RECORDS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "Records":
+    import pandas as pd
+    from db_logger import (fetch_maintenance_logs, fetch_observation_logs,
+                           fetch_performance_logs)
+
     st.header("RECORDS")
 
-    # ── Filters ───────────────────────────────────────────────────────────────
+    # ── Shared filters ────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("FILTERS")
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS)
-        f_act  = fc2.selectbox("Activity Type", ["All types"] + ACTIVITY_OPTIONS)
-        f_sev  = fc3.selectbox("Severity",  ["All severities"] + SEVERITY_OPTIONS)
-        f_srch = fc4.text_input("Keyword search",
-                                placeholder="summary, issues, components…")
-
+        fc1, fc2, fc3 = st.columns(3)
+        f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS, key="rec_eng")
+        f_srch = fc2.text_input("Keyword search", placeholder="component, activity, metric…", key="rec_srch")
+        f_log_type = fc3.selectbox(
+            "Log Type",
+            ["Maintenance", "Observations", "Performance", "Legacy (memo_log)"],
+            key="rec_logtype",
+        )
         fd1, fd2, fd3 = st.columns(3)
-        f_from = fd1.date_input("From", value=None)
-        f_to   = fd2.date_input("To",   value=None)
+        f_from = fd1.date_input("From", value=None, key="rec_from")
+        f_to   = fd2.date_input("To",   value=None, key="rec_to")
         with fd3:
-            st.write("")
-            st.write("")
-            ac1, ac2 = st.columns(2)
-            do_apply = ac1.button("Apply",  type="primary",   use_container_width=True)
-            do_clear = ac2.button("Clear filters",            use_container_width=True)
+            st.write(""); st.write("")
+            rc1, rc2 = st.columns(2)
+            do_apply = rc1.button("Apply",         type="primary", use_container_width=True, key="rec_apply")
+            do_clear = rc2.button("Clear filters",                 use_container_width=True, key="rec_clear")
 
     if do_clear:
         st.cache_data.clear()
@@ -832,52 +924,141 @@ elif page == "Records":
     if do_apply:
         st.cache_data.clear()
 
-    # ── Fetch ─────────────────────────────────────────────────────────────────
-    try:
-        rows = _load_records(f_eng, f_act, f_sev, f_srch, f_from, f_to)
-    except Exception as e:
-        st.error(f"Could not load records: {e}")
-        rows = []
+    eng_filter  = "" if f_eng  == "All engineers" else f_eng
+    srch_filter = f_srch or ""
+    from_str    = str(f_from) if f_from else ""
+    to_str      = str(f_to)   if f_to   else ""
 
-    # ── Toolbar ───────────────────────────────────────────────────────────────
-    tc1, tc2 = st.columns([4, 1])
-    tc1.caption(f"**{len(rows)}** record{'s' if len(rows) != 1 else ''}")
+    # ── MAINTENANCE ───────────────────────────────────────────────────────────
+    if f_log_type == "Maintenance":
+        try:
+            rows = fetch_maintenance_logs(eng_filter, srch_filter, from_str, to_str)
+        except Exception as e:
+            st.error(f"Could not load maintenance logs: {e}"); rows = []
 
-    if tc2.button("📊  Export Excel", use_container_width=True):
+        st.caption(f"**{len(rows)}** maintenance record{'s' if len(rows)!=1 else ''}")
+        st.divider()
         if not rows:
-            st.warning("No records to export.")
+            st.info("No maintenance records match your filters.", icon="ℹ️")
         else:
-            try:
-                from excel_export import export_to_excel
-                with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-                    export_to_excel(rows, tmp.name)
-                    excel_bytes = open(tmp.name, "rb").read()
-                fname = f"memo_log_{datetime.now():%Y%m%d_%H%M}.xlsx"
-                st.download_button(
-                    "⬇️  Download Excel",
-                    data=excel_bytes, file_name=fname,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            except Exception as e:
-                st.error(f"Export error: {e}")
+            for row in rows:
+                ts     = row.get("date_recorded")
+                ts_str = ts.strftime("%Y-%m-%d  %H:%M") if hasattr(ts,"strftime") else str(ts)
+                sev    = row.get("severity","") or ""
+                badge  = SEV_BADGE.get(sev,"⚪")
+                comp   = row.get("component_canonical") or row.get("component_raw","—")
+                act    = (row.get("activity_performed") or "")[:80]
+                with st.expander(f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {comp}  ·  {act}"):
+                    c1, c2 = st.columns(2)
+                    c1.markdown(f"**Component:** {comp}")
+                    c1.markdown(f"**Activity:** {row.get('activity_performed','')}")
+                    c1.markdown(f"**Duration:** {row.get('duration_hours') or '—'} hrs")
+                    c2.markdown(f"**Severity:** {sev or '—'}")
+                    c2.markdown(f"**Outcome:** {row.get('outcome') or '—'}")
+                    c2.markdown(f"**Engineer:** {row.get('engineer','')}")
 
-    # ── Records list ──────────────────────────────────────────────────────────
-    st.divider()
-    if not rows:
-        st.info("No records match your filters.", icon="ℹ️")
-    else:
-        for row in rows:
-            ts    = row.get("logged_at")
-            ts_str= ts.strftime("%Y-%m-%d  %H:%M UTC") if hasattr(ts,"strftime") else str(ts)
-            sev   = row.get("severity","") or ""
-            badge = SEV_BADGE.get(sev,"⚪")
-            summary_preview = (row.get("summary") or "")[:90]
+    # ── OBSERVATIONS ──────────────────────────────────────────────────────────
+    elif f_log_type == "Observations":
+        try:
+            rows = fetch_observation_logs(eng_filter, srch_filter, from_str, to_str)
+        except Exception as e:
+            st.error(f"Could not load observation logs: {e}"); rows = []
 
-            act_label = row.get("activity_type","") or ""
-            with st.expander(
-                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}  ·  {summary_preview}"
-            ):
-                _edit_row(row)
+        st.caption(f"**{len(rows)}** observation record{'s' if len(rows)!=1 else ''}")
+        st.divider()
+        if not rows:
+            st.info("No observations match your filters.", icon="ℹ️")
+        else:
+            for row in rows:
+                ts     = row.get("date_recorded")
+                ts_str = ts.strftime("%Y-%m-%d  %H:%M") if hasattr(ts,"strftime") else str(ts)
+                sev    = row.get("severity","") or ""
+                badge  = SEV_BADGE.get(sev,"⚪")
+                comp   = row.get("component_canonical") or row.get("component_raw","—")
+                obs    = (row.get("observation") or "")[:80]
+                fu     = "⚠️ Follow-up required" if row.get("follow_up_required") else ""
+                with st.expander(f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {comp}  ·  {obs}"):
+                    c1, c2 = st.columns(2)
+                    c1.markdown(f"**Component:** {comp}")
+                    c1.markdown(f"**Observation:** {row.get('observation','')}")
+                    c1.markdown(f"**Type:** {row.get('observation_type','—')}")
+                    c2.markdown(f"**Severity:** {sev or '—'}")
+                    c2.markdown(f"**Engineer:** {row.get('engineer','')}")
+                    if fu:
+                        c2.warning(fu)
+
+    # ── PERFORMANCE ───────────────────────────────────────────────────────────
+    elif f_log_type == "Performance":
+        try:
+            rows = fetch_performance_logs(eng_filter, srch_filter, from_str, to_str)
+        except Exception as e:
+            st.error(f"Could not load performance logs: {e}"); rows = []
+
+        st.caption(f"**{len(rows)}** performance record{'s' if len(rows)!=1 else ''}")
+
+        # Summary dataframe at top for quick scanning
+        if rows:
+            pdf = pd.DataFrame([{
+                "date":      r.get("date_recorded").strftime("%Y-%m-%d") if hasattr(r.get("date_recorded"),"strftime") else str(r.get("date_recorded","")),
+                "engineer":  r.get("engineer",""),
+                "component": r.get("component_canonical") or r.get("component_raw",""),
+                "metric":    r.get("metric_name",""),
+                "value":     r.get("metric_value"),
+                "unit":      r.get("metric_unit",""),
+                "anomaly":   "⚠️" if r.get("anomaly_flag") else "",
+                "in_spec":   "✅" if r.get("within_spec") == True else ("❌" if r.get("within_spec") == False else "—"),
+            } for r in rows])
+            st.dataframe(pdf, use_container_width=True, hide_index=True,
+                         column_config={
+                             "value": st.column_config.NumberColumn("Value"),
+                             "anomaly": st.column_config.TextColumn("⚠️"),
+                             "in_spec": st.column_config.TextColumn("In Spec"),
+                         })
+        else:
+            st.info("No performance records match your filters.", icon="ℹ️")
+
+    # ── LEGACY (memo_log) ─────────────────────────────────────────────────────
+    elif f_log_type == "Legacy (memo_log)":
+        try:
+            rows = _load_records(
+                "" if f_eng == "All engineers" else f_eng,
+                "", "",  # no activity_type or severity filter
+                srch_filter, f_from, f_to,
+            )
+        except Exception as e:
+            st.error(f"Could not load records: {e}"); rows = []
+
+        tc1, tc2 = st.columns([4, 1])
+        tc1.caption(f"**{len(rows)}** record{'s' if len(rows)!=1 else ''}")
+        if tc2.button("📊  Export Excel", use_container_width=True, key="rec_export"):
+            if not rows:
+                st.warning("No records to export.")
+            else:
+                try:
+                    from excel_export import export_to_excel
+                    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                        export_to_excel(rows, tmp.name)
+                        excel_bytes = open(tmp.name, "rb").read()
+                    fname = f"memo_log_{datetime.now():%Y%m%d_%H%M}.xlsx"
+                    st.download_button("⬇️  Download Excel", data=excel_bytes, file_name=fname,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except Exception as e:
+                    st.error(f"Export error: {e}")
+
+        st.divider()
+        if not rows:
+            st.info("No records match your filters.", icon="ℹ️")
+        else:
+            for row in rows:
+                ts     = row.get("logged_at")
+                ts_str = ts.strftime("%Y-%m-%d  %H:%M UTC") if hasattr(ts,"strftime") else str(ts)
+                sev    = row.get("severity","") or ""
+                badge  = SEV_BADGE.get(sev,"⚪")
+                summary_preview = (row.get("summary") or "")[:90]
+                with st.expander(
+                    f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {summary_preview}"
+                ):
+                    _edit_row(row)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
