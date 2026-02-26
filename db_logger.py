@@ -464,36 +464,73 @@ def fetch_action_items(engineer="", status="", search="") -> list[dict]:
 
 # Schema description passed to Claude so it can write accurate SQL
 DB_SCHEMA = """
-You have access to two PostgreSQL (TimescaleDB) tables:
+You have access to these PostgreSQL (TimescaleDB) tables:
 
-TABLE: memo_log
-  id                  BIGINT          -- unique row ID
-  logged_at           TIMESTAMPTZ     -- when the entry was saved (UTC)
-  engineer            TEXT            -- who logged it (e.g. 'PJ Callahan')
-  source_file         TEXT            -- audio filename or 'Live Recording'
-  activity_type       TEXT            -- 'Regular Maintenance' | 'Unplanned Maintenance' | 'Technical Milestone' | 'Logistics' | 'Other'
-  summary             TEXT            -- 1-2 sentence summary of the entry
-  system_performance  TEXT            -- observations about system behaviour
-  maintenance_done    TEXT            -- maintenance activities completed
-  issues_found        TEXT            -- problems or unexpected behaviours
-  action_items        TEXT            -- follow-up tasks
-  components_affected TEXT            -- parts or subsystems mentioned
-  duration_hours      NUMERIC         -- time spent (may be NULL)
-  severity            TEXT            -- 'Critical' | 'High' | 'Medium' | 'Low' | 'None'
-  additional_notes    TEXT
-  raw_transcript      TEXT            -- full verbatim transcript
+TABLE: maintenance_logs  (primary structured log of work performed)
+  id                  BIGINT
+  date_recorded       TIMESTAMPTZ
+  engineer            TEXT
+  component_raw       TEXT            -- component name as spoken by engineer
+  activity_performed  TEXT            -- what maintenance was done
+  duration_hours      NUMERIC
+  severity            TEXT            -- 'Critical'|'High'|'Medium'|'Low'|'None'
+  outcome             TEXT            -- 'resolved'|'monitoring'|'escalated'
+  component_canonical TEXT            -- via JOIN to components
+
+TABLE: observation_logs  (qualitative observations, anomalies, concerns)
+  id                  BIGINT
+  date_recorded       TIMESTAMPTZ
+  engineer            TEXT
+  component_raw       TEXT
+  observation         TEXT            -- what was observed
+  observation_type    TEXT            -- 'anomaly'|'degradation'|'normal'|'informational'|'concern'
+  severity            TEXT
+  follow_up_required  BOOLEAN
+  component_canonical TEXT            -- via JOIN to components
+
+TABLE: system_performance_logs  (numeric metrics and readings)
+  id                  BIGINT
+  date_recorded       TIMESTAMPTZ
+  engineer            TEXT
+  component_raw       TEXT
+  metric_name         TEXT            -- e.g. 'pressure','temperature','flow_rate','vibration'
+  metric_value        NUMERIC
+  metric_unit         TEXT            -- e.g. 'bar','degC','L/min'
+  metric_narrative    TEXT            -- free text when no clean numeric
+  within_spec         BOOLEAN
+  anomaly_flag        BOOLEAN
+  component_canonical TEXT            -- via JOIN to components
 
 TABLE: action_items
   id           BIGINT
   created_at   TIMESTAMPTZ
   updated_at   TIMESTAMPTZ
-  memo_id      BIGINT                 -- references memo_log.id (may be NULL)
+  memo_id      BIGINT
   engineer     TEXT
-  action_text  TEXT                   -- the action item description
-  status       TEXT                   -- 'Not Started' | 'In Progress' | 'Complete'
-  responsible  TEXT                   -- person responsible
+  action_text  TEXT
+  status       TEXT                   -- 'Not Started'|'In Progress'|'Complete'
+  responsible  TEXT
   due_date     DATE
   notes        TEXT
+
+TABLE: components  (canonical component registry)
+  id             BIGINT
+  part_number    TEXT
+  canonical_name TEXT
+  category       TEXT
+  subsystem      TEXT
+  aliases        TEXT[]
+
+TABLE: memo_log  (legacy summary table, kept for historical records)
+  id            BIGINT
+  logged_at     TIMESTAMPTZ
+  engineer      TEXT
+  summary       TEXT
+  raw_transcript TEXT
+
+JOIN HINT: maintenance_logs/observation_logs/system_performance_logs all have a
+component_id foreign key. To get canonical names:
+  LEFT JOIN components c ON c.id = ml.component_id
 """
 
 def run_read_query(sql: str) -> list[dict]:
@@ -659,3 +696,437 @@ def bulk_insert_gantt_tasks(task_list: list[dict]) -> list[dict]:
     finally:
         conn.close()
     return created
+
+
+# ── Components master table ───────────────────────────────────────────────────
+
+FETCH_COMPONENTS_SQL = """
+SELECT id, part_number, canonical_name, category, subsystem, aliases, active, notes
+FROM components
+WHERE active = TRUE
+ORDER BY canonical_name;
+"""
+
+FETCH_ALL_COMPONENTS_SQL = """
+SELECT id, part_number, canonical_name, category, subsystem, aliases, active, notes
+FROM components
+ORDER BY canonical_name;
+"""
+
+INSERT_COMPONENT_SQL = """
+INSERT INTO components (part_number, canonical_name, category, subsystem, aliases, notes)
+VALUES (%(part_number)s, %(canonical_name)s, %(category)s, %(subsystem)s,
+        %(aliases)s, %(notes)s)
+RETURNING id;
+"""
+
+UPDATE_COMPONENT_SQL = """
+UPDATE components SET
+    part_number    = %(part_number)s,
+    canonical_name = %(canonical_name)s,
+    category       = %(category)s,
+    subsystem      = %(subsystem)s,
+    aliases        = %(aliases)s,
+    notes          = %(notes)s,
+    active         = %(active)s
+WHERE id = %(id)s;
+"""
+
+
+def fetch_components(include_inactive=False):
+    """Return list of component dicts. aliases is a Python list."""
+    sql = FETCH_ALL_COMPONENTS_SQL if include_inactive else FETCH_COMPONENTS_SQL
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql)
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                # psycopg2 returns arrays as Python lists already
+                if d["aliases"] is None:
+                    d["aliases"] = []
+                rows.append(d)
+        return rows
+    finally:
+        conn.close()
+
+
+def upsert_component(fields: dict) -> int:
+    """Insert or update a component. Returns id."""
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if fields.get("id"):
+                    cur.execute(UPDATE_COMPONENT_SQL, {
+                        "id":            fields["id"],
+                        "part_number":   fields.get("part_number") or None,
+                        "canonical_name":fields["canonical_name"],
+                        "category":      fields.get("category") or None,
+                        "subsystem":     fields.get("subsystem") or None,
+                        "aliases":       fields.get("aliases") or [],
+                        "notes":         fields.get("notes") or None,
+                        "active":        fields.get("active", True),
+                    })
+                    return fields["id"]
+                else:
+                    cur.execute(INSERT_COMPONENT_SQL, {
+                        "part_number":   fields.get("part_number") or None,
+                        "canonical_name":fields["canonical_name"],
+                        "category":      fields.get("category") or None,
+                        "subsystem":     fields.get("subsystem") or None,
+                        "aliases":       fields.get("aliases") or [],
+                        "notes":         fields.get("notes") or None,
+                    })
+                    return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def add_alias_to_component(component_id: int, new_alias: str):
+    """Append a new alias to a component's alias array."""
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE components
+                    SET aliases = array_append(aliases, %(alias)s)
+                    WHERE id = %(id)s
+                      AND NOT (%(alias)s = ANY(aliases));
+                """, {"id": component_id, "alias": new_alias.lower().strip()})
+    finally:
+        conn.close()
+
+
+# ── New structured tables — CRUD ──────────────────────────────────────────────
+
+INSERT_MAINTENANCE_SQL = """
+INSERT INTO maintenance_logs
+    (date_recorded, engineer, component_id, component_raw,
+     activity_performed, duration_hours, severity, outcome, source_memo_id)
+VALUES
+    (COALESCE(%(date_recorded)s::timestamptz, NOW()),
+     %(engineer)s, %(component_id)s, %(component_raw)s,
+     %(activity_performed)s, %(duration_hours)s, %(severity)s,
+     %(outcome)s, %(source_memo_id)s)
+RETURNING id, date_recorded;
+"""
+
+INSERT_OBSERVATION_SQL = """
+INSERT INTO observation_logs
+    (date_recorded, engineer, component_id, component_raw,
+     observation, observation_type, severity, follow_up_required, source_memo_id)
+VALUES
+    (COALESCE(%(date_recorded)s::timestamptz, NOW()),
+     %(engineer)s, %(component_id)s, %(component_raw)s,
+     %(observation)s, %(observation_type)s, %(severity)s,
+     %(follow_up_required)s, %(source_memo_id)s)
+RETURNING id, date_recorded;
+"""
+
+INSERT_PERFORMANCE_SQL = """
+INSERT INTO system_performance_logs
+    (date_recorded, engineer, component_id, component_raw,
+     metric_name, metric_value, metric_unit, metric_narrative,
+     within_spec, anomaly_flag, source_memo_id)
+VALUES
+    (COALESCE(%(date_recorded)s::timestamptz, NOW()),
+     %(engineer)s, %(component_id)s, %(component_raw)s,
+     %(metric_name)s, %(metric_value)s, %(metric_unit)s, %(metric_narrative)s,
+     %(within_spec)s, %(anomaly_flag)s, %(source_memo_id)s)
+RETURNING id, date_recorded;
+"""
+
+FETCH_MAINTENANCE_SQL = """
+SELECT ml.id, ml.date_recorded, ml.engineer, ml.component_raw,
+       ml.activity_performed, ml.duration_hours, ml.severity, ml.outcome,
+       c.canonical_name AS component_canonical
+FROM maintenance_logs ml
+LEFT JOIN components c ON c.id = ml.component_id
+WHERE
+    (%(engineer)s  = '' OR ml.engineer = %(engineer)s)
+    AND (%(search)s = '' OR ml.activity_performed ILIKE %(search_like)s
+                         OR ml.component_raw ILIKE %(search_like)s)
+    AND (%(date_from)s = '' OR ml.date_recorded::date >= %(date_from)s::date)
+    AND (%(date_to)s   = '' OR ml.date_recorded::date <= %(date_to)s::date)
+ORDER BY ml.date_recorded DESC
+LIMIT 500;
+"""
+
+FETCH_OBSERVATIONS_SQL = """
+SELECT ol.id, ol.date_recorded, ol.engineer, ol.component_raw,
+       ol.observation, ol.observation_type, ol.severity, ol.follow_up_required,
+       c.canonical_name AS component_canonical
+FROM observation_logs ol
+LEFT JOIN components c ON c.id = ol.component_id
+WHERE
+    (%(engineer)s  = '' OR ol.engineer = %(engineer)s)
+    AND (%(search)s = '' OR ol.observation ILIKE %(search_like)s
+                         OR ol.component_raw ILIKE %(search_like)s)
+    AND (%(date_from)s = '' OR ol.date_recorded::date >= %(date_from)s::date)
+    AND (%(date_to)s   = '' OR ol.date_recorded::date <= %(date_to)s::date)
+ORDER BY ol.date_recorded DESC
+LIMIT 500;
+"""
+
+FETCH_PERFORMANCE_SQL = """
+SELECT pl.id, pl.date_recorded, pl.engineer, pl.component_raw,
+       pl.metric_name, pl.metric_value, pl.metric_unit,
+       pl.metric_narrative, pl.within_spec, pl.anomaly_flag,
+       c.canonical_name AS component_canonical
+FROM system_performance_logs pl
+LEFT JOIN components c ON c.id = pl.component_id
+WHERE
+    (%(engineer)s  = '' OR pl.engineer = %(engineer)s)
+    AND (%(search)s = '' OR pl.metric_name ILIKE %(search_like)s
+                         OR pl.component_raw ILIKE %(search_like)s
+                         OR pl.metric_narrative ILIKE %(search_like)s)
+    AND (%(date_from)s = '' OR pl.date_recorded::date >= %(date_from)s::date)
+    AND (%(date_to)s   = '' OR pl.date_recorded::date <= %(date_to)s::date)
+ORDER BY pl.date_recorded DESC
+LIMIT 500;
+"""
+
+FETCH_UNMATCHED_SQL = """
+SELECT component_raw, COUNT(*) AS occurrences FROM (
+    SELECT component_raw FROM maintenance_logs    WHERE component_id IS NULL AND component_raw IS NOT NULL
+    UNION ALL
+    SELECT component_raw FROM observation_logs    WHERE component_id IS NULL AND component_raw IS NOT NULL
+    UNION ALL
+    SELECT component_raw FROM system_performance_logs WHERE component_id IS NULL AND component_raw IS NOT NULL
+) t
+GROUP BY component_raw
+ORDER BY occurrences DESC;
+"""
+
+
+def _resolve_component_id(canonical_name, alias_map_lookup):
+    """Given a canonical name string, return the DB component id or None."""
+    if not canonical_name:
+        return None
+    return alias_map_lookup.get(canonical_name.lower().strip())
+
+
+def _parse_num(val):
+    """Convert value to float or None."""
+    if val is None or val == "" or val != val:  # nan check
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def process_transcript(structured: dict, raw_transcript: str,
+                       source_file: str, engineer: str,
+                       date_recorded=None) -> dict:
+    """
+    Write a fully structured extraction to all four tables plus memo_log.
+    Everything in one transaction — rolls back on any failure.
+
+    structured: output from extractor.extract_structured()
+    Returns: {
+        memo_id, n_maintenance, n_observations, n_performance, n_actions,
+        unmatched_components: [str]
+    }
+    """
+    # Build alias->id lookup for component resolution
+    try:
+        comp_rows = fetch_components()
+        name_to_id = {}
+        for row in comp_rows:
+            name_to_id[row["canonical_name"].lower().strip()] = row["id"]
+            if row.get("part_number"):
+                name_to_id[row["part_number"].lower().strip()] = row["id"]
+            for alias in (row.get("aliases") or []):
+                if alias:
+                    name_to_id[alias.lower().strip()] = row["id"]
+    except Exception:
+        name_to_id = {}
+
+    def _comp_id(record):
+        cc = record.get("component_canonical")
+        if cc:
+            return name_to_id.get(cc.lower().strip())
+        return None
+
+    conn = _connect()
+    result = {
+        "memo_id": None, "n_maintenance": 0, "n_observations": 0,
+        "n_performance": 0, "n_actions": 0, "unmatched_components": []
+    }
+
+    try:
+        with conn:   # single transaction
+            with conn.cursor() as cur:
+
+                # ── 1. Write legacy memo_log row ─────────────────────────────
+                # Build summary from structured data
+                n_m = len(structured.get("maintenance_performed", []))
+                n_o = len(structured.get("qualitative_observations", []))
+                n_p = len(structured.get("system_performance", []))
+                n_a = len(structured.get("action_items", []))
+                parts = []
+                if n_m: parts.append(f"{n_m} maintenance activit{'ies' if n_m>1 else 'y'}")
+                if n_o: parts.append(f"{n_o} observation{'s' if n_o>1 else ''}")
+                if n_p: parts.append(f"{n_p} performance metric{'s' if n_p>1 else ''}")
+                if n_a: parts.append(f"{n_a} action item{'s' if n_a>1 else ''}")
+                summary = ("Recorded: " + ", ".join(parts) + ".") if parts else "Entry saved."
+
+                sev_rank = {"Critical":5,"High":4,"Medium":3,"Low":2,"None":1,"":0,None:0}
+                all_sevs = (
+                    [r.get("severity") for r in structured.get("maintenance_performed",[])] +
+                    [r.get("severity") for r in structured.get("qualitative_observations",[])]
+                )
+                top_sev = max(all_sevs, key=lambda s: sev_rank.get(s,0), default="None") or "None"
+                if top_sev not in ("Critical","High","Medium","Low","None"):
+                    top_sev = "None"
+
+                memo_row = {
+                    "engineer":            engineer,
+                    "source_file":         source_file,
+                    "activity_type":       "Other",
+                    "summary":             summary,
+                    "system_performance":  "",
+                    "maintenance_done":    "",
+                    "issues_found":        "",
+                    "action_items":        "",
+                    "components_affected": "",
+                    "duration_hours":      None,
+                    "severity":            top_sev,
+                    "additional_notes":    "",
+                    "raw_transcript":      raw_transcript,
+                    "raw_insights_json":   json.dumps(structured),
+                    "logged_at":           date_recorded,
+                }
+                cur.execute(INSERT_SQL, memo_row)
+                memo_id, _ = cur.fetchone()
+                result["memo_id"] = memo_id
+
+                # ── 2. Maintenance logs ───────────────────────────────────────
+                for r in structured.get("maintenance_performed", []):
+                    cid = _comp_id(r)
+                    if not r.get("component_canonical") and not cid:
+                        result["unmatched_components"].append(r.get("component_raw",""))
+                    cur.execute(INSERT_MAINTENANCE_SQL, {
+                        "date_recorded":     date_recorded,
+                        "engineer":          engineer,
+                        "component_id":      cid,
+                        "component_raw":     r.get("component_raw") or "",
+                        "activity_performed":r.get("activity_performed",""),
+                        "duration_hours":    _parse_num(r.get("duration_hours")),
+                        "severity":          r.get("severity") or "None",
+                        "outcome":           r.get("outcome") or None,
+                        "source_memo_id":    memo_id,
+                    })
+                    result["n_maintenance"] += 1
+
+                # ── 3. Observation logs ───────────────────────────────────────
+                for r in structured.get("qualitative_observations", []):
+                    cid = _comp_id(r)
+                    if not r.get("component_canonical") and not cid:
+                        result["unmatched_components"].append(r.get("component_raw",""))
+                    cur.execute(INSERT_OBSERVATION_SQL, {
+                        "date_recorded":    date_recorded,
+                        "engineer":         engineer,
+                        "component_id":     cid,
+                        "component_raw":    r.get("component_raw") or "",
+                        "observation":      r.get("observation",""),
+                        "observation_type": r.get("observation_type") or "informational",
+                        "severity":         r.get("severity") or "None",
+                        "follow_up_required": bool(r.get("follow_up_required", False)),
+                        "source_memo_id":   memo_id,
+                    })
+                    result["n_observations"] += 1
+
+                # ── 4. System performance logs ────────────────────────────────
+                for r in structured.get("system_performance", []):
+                    cid = _comp_id(r)
+                    if not r.get("component_canonical") and not cid:
+                        result["unmatched_components"].append(r.get("component_raw",""))
+                    cur.execute(INSERT_PERFORMANCE_SQL, {
+                        "date_recorded":   date_recorded,
+                        "engineer":        engineer,
+                        "component_id":    cid,
+                        "component_raw":   r.get("component_raw") or "",
+                        "metric_name":     r.get("metric_name","other"),
+                        "metric_value":    _parse_num(r.get("metric_value")),
+                        "metric_unit":     r.get("metric_unit") or None,
+                        "metric_narrative":r.get("metric_narrative") or None,
+                        "within_spec":     r.get("within_spec"),
+                        "anomaly_flag":    bool(r.get("anomaly_flag", False)),
+                        "source_memo_id":  memo_id,
+                    })
+                    result["n_performance"] += 1
+
+                # ── 5. Action items ───────────────────────────────────────────
+                for r in structured.get("action_items", []):
+                    if not r.get("action_text","").strip():
+                        continue
+                    cur.execute(INSERT_ACTION_SQL, {
+                        "memo_id":     memo_id,
+                        "engineer":    engineer,
+                        "action_text": r["action_text"],
+                        "responsible": r.get("responsible") or "",
+                        "due_date":    r.get("due_date") or None,
+                    })
+                    result["n_actions"] += 1
+
+        # Deduplicate unmatched list
+        seen = set()
+        result["unmatched_components"] = [
+            x for x in result["unmatched_components"]
+            if x and not (x in seen or seen.add(x))
+        ]
+        return result
+
+    finally:
+        conn.close()
+
+
+def fetch_maintenance_logs(engineer="", search="", date_from="", date_to=""):
+    params = {"engineer": engineer, "search": search,
+              "search_like": f"%{search}%", "date_from": date_from, "date_to": date_to}
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_MAINTENANCE_SQL, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_observation_logs(engineer="", search="", date_from="", date_to=""):
+    params = {"engineer": engineer, "search": search,
+              "search_like": f"%{search}%", "date_from": date_from, "date_to": date_to}
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_OBSERVATIONS_SQL, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_performance_logs(engineer="", search="", date_from="", date_to=""):
+    params = {"engineer": engineer, "search": search,
+              "search_like": f"%{search}%", "date_from": date_from, "date_to": date_to}
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_PERFORMANCE_SQL, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_unmatched_components():
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(FETCH_UNMATCHED_SQL)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()

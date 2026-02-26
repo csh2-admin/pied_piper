@@ -364,6 +364,7 @@ for k, v in {
     "audio_bytes":  None,
     "audio_suffix": ".wav",
     "chat_history": [],   # list of {"role": "user"|"assistant", "content": str, "sql": str|None, "rows": list|None}
+    "structured_insights": None,   # output from extract_structured()
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -488,7 +489,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["New Entry", "Records", "Actions", "Gantt", "Ask Weebo"],
+        ["New Entry", "Records", "Actions", "Gantt", "Ask Weebo", "Components"],
         label_visibility="collapsed",
     )
 
@@ -573,116 +574,220 @@ if page == "New Entry":
     with st.container(border=True):
         st.subheader("STEP 3 — EXTRACT WITH WEEBO")
 
-        if st.button("✨  Extract Insights",
+        if st.button("✨  Extract & Structure",
                      disabled=not st.session_state.transcript.strip(),
                      type="primary"):
             with st.spinner("Sending to Weebo…"):
                 try:
-                    from extractor import extract_insights
-                    st.session_state.insights = extract_insights(st.session_state.transcript)
-                    st.success("Extraction complete — review below.")
+                    from extractor import extract_structured
+                    st.session_state.structured_insights = extract_structured(
+                        st.session_state.transcript
+                    )
+                    st.success("Extraction complete — review and edit below before saving.")
                 except Exception as e:
                     st.error(f"Extraction error: {e}")
 
-        if st.session_state.insights:
-            st.success("Extraction complete — review and edit fields below before saving.")
+        if st.session_state.structured_insights:
+            s = st.session_state.structured_insights
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Maintenance",  len(s.get("maintenance_performed",[])))
+            mc2.metric("Observations", len(s.get("qualitative_observations",[])))
+            mc3.metric("Performance",  len(s.get("system_performance",[])))
+            mc4.metric("Action Items", len(s.get("action_items",[])))
+            if s.get("unmatched_components"):
+                st.warning(
+                    "⚠️ Unmatched components (not in registry): "
+                    + ", ".join(s["unmatched_components"])
+                    + " — go to Components page to register them.",
+                    icon="⚠️"
+                )
+            if s.get("_parse_error"):
+                st.error(f"Partial parse error — some data may be missing. Raw: {s['_parse_error']}")
 
     # ── Step 4: Review, Edit & Save ───────────────────────────────────────────
     with st.container(border=True):
         st.subheader("STEP 4 — REVIEW, EDIT & SAVE")
 
-        if not st.session_state.insights:
+        if not st.session_state.structured_insights:
             st.caption("Extract insights first to unlock this section.")
         else:
-            ins = st.session_state.insights
+            import pandas as pd
+            s = st.session_state.structured_insights
 
-            # ── Editable fields form ──────────────────────────────────────────
-            with st.form("edit_insights_form"):
-                st.markdown("##### Review extracted fields — edit anything before saving")
-
-                # Row 1: Activity type + Severity side by side (dropdowns)
-                r1c1, r1c2 = st.columns(2)
-                cur_act = ins.get("activity_type","Other") or "Other"
-                act_idx = ACTIVITY_OPTIONS.index(cur_act) if cur_act in ACTIVITY_OPTIONS else 4
-                f_activity = r1c1.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx)
-
-                cur_sev = ins.get("severity","None") or "None"
-                sev_idx = SEVERITY_OPTIONS.index(cur_sev) if cur_sev in SEVERITY_OPTIONS else 4
-                f_severity = r1c2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_idx)
-
-                # Summary — full width
-                f_summary = st.text_area("Summary",
-                    value=ins.get("summary","") or "", height=75)
-
-                # Row 2: two-column text areas
-                c1, c2 = st.columns(2)
-                f_sp   = c1.text_area("System Performance",
-                    value=ins.get("system_performance","") or "", height=100)
-                f_md   = c1.text_area("Maintenance Done",
-                    value=ins.get("maintenance_done","") or "", height=100)
-                f_if   = c1.text_area("Issues Found",
-                    value=ins.get("issues_found","") or "", height=100)
-                f_ai   = c2.text_area("Action Items",
-                    value=ins.get("action_items","") or "", height=100)
-                f_ca   = c2.text_input("Components Affected",
-                    value=ins.get("components_affected","") or "")
-                f_dur  = c2.text_input("Duration (hrs)",
-                    value=str(ins.get("duration_hours","") or ""))
-                f_an   = st.text_area("Additional Notes",
-                    value=ins.get("additional_notes","") or "", height=75)
-
-                st.divider()
+            # Date + save controls at top
+            with st.form("save_form_top"):
                 dc1, dc2 = st.columns([1, 2])
                 f_date_recorded = dc1.date_input(
                     "Date Recorded",
                     value=None,
-                    help="Leave blank to use today's date. Set a past date to log a historical entry.",
+                    help="Leave blank for today. Set a past date for historical entries.",
                     key="date_recorded",
                 )
                 dc2.caption("Leave blank to record as today. Set a past date for historical entries.")
                 sc1, sc2 = st.columns([1, 1])
-                do_save  = sc1.form_submit_button("💾  Save to Database",
-                                                  type="primary",
-                                                  use_container_width=True)
-                do_clear = sc2.form_submit_button("🗑  Clear all",
-                                                  use_container_width=True)
+                do_save  = sc1.form_submit_button("💾  Save All to Database",
+                                                  type="primary", use_container_width=True)
+                do_clear = sc2.form_submit_button("🗑  Clear", use_container_width=True)
 
+            st.divider()
+
+            # ── Maintenance ───────────────────────────────────────────────────
+            maint_rows = s.get("maintenance_performed", [])
+            with st.expander(f"🔧  MAINTENANCE  ({len(maint_rows)} item{'s' if len(maint_rows)!=1 else ''})", expanded=True):
+                if maint_rows:
+                    maint_df = pd.DataFrame([{
+                        "component":  r.get("component_canonical") or r.get("component_raw",""),
+                        "activity":   r.get("activity_performed",""),
+                        "hours":      r.get("duration_hours"),
+                        "severity":   r.get("severity","None"),
+                        "outcome":    r.get("outcome") or "",
+                    } for r in maint_rows])
+                    edited_maint = st.data_editor(
+                        maint_df,
+                        use_container_width=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "severity": st.column_config.SelectboxColumn(
+                                "Severity", options=SEVERITY_OPTIONS),
+                            "outcome": st.column_config.SelectboxColumn(
+                                "Outcome", options=["resolved","monitoring","escalated",""]),
+                            "hours": st.column_config.NumberColumn("Hours", min_value=0, step=0.25),
+                        },
+                        key="maint_editor",
+                    )
+                    # Write edits back to session state
+                    for i, row in edited_maint.iterrows():
+                        if i < len(s["maintenance_performed"]):
+                            s["maintenance_performed"][i]["activity_performed"] = row["activity"]
+                            s["maintenance_performed"][i]["duration_hours"]     = row["hours"]
+                            s["maintenance_performed"][i]["severity"]           = row["severity"]
+                            s["maintenance_performed"][i]["outcome"]            = row["outcome"] or None
+                else:
+                    st.caption("No maintenance activities extracted.")
+
+            # ── Observations ──────────────────────────────────────────────────
+            obs_rows = s.get("qualitative_observations", [])
+            with st.expander(f"👁  OBSERVATIONS  ({len(obs_rows)} item{'s' if len(obs_rows)!=1 else ''})", expanded=True):
+                if obs_rows:
+                    obs_df = pd.DataFrame([{
+                        "component":       r.get("component_canonical") or r.get("component_raw",""),
+                        "observation":     r.get("observation",""),
+                        "type":            r.get("observation_type","informational"),
+                        "severity":        r.get("severity","None"),
+                        "follow_up":       bool(r.get("follow_up_required", False)),
+                    } for r in obs_rows])
+                    edited_obs = st.data_editor(
+                        obs_df,
+                        use_container_width=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "type": st.column_config.SelectboxColumn(
+                                "Type", options=["anomaly","degradation","normal","informational","concern"]),
+                            "severity": st.column_config.SelectboxColumn(
+                                "Severity", options=SEVERITY_OPTIONS),
+                            "follow_up": st.column_config.CheckboxColumn("Follow Up?"),
+                        },
+                        key="obs_editor",
+                    )
+                    for i, row in edited_obs.iterrows():
+                        if i < len(s["qualitative_observations"]):
+                            s["qualitative_observations"][i]["observation"]       = row["observation"]
+                            s["qualitative_observations"][i]["observation_type"]  = row["type"]
+                            s["qualitative_observations"][i]["severity"]          = row["severity"]
+                            s["qualitative_observations"][i]["follow_up_required"]= bool(row["follow_up"])
+                else:
+                    st.caption("No observations extracted.")
+
+            # ── System Performance ────────────────────────────────────────────
+            perf_rows = s.get("system_performance", [])
+            with st.expander(f"📊  SYSTEM PERFORMANCE  ({len(perf_rows)} item{'s' if len(perf_rows)!=1 else ''})", expanded=True):
+                if perf_rows:
+                    perf_df = pd.DataFrame([{
+                        "component":  r.get("component_canonical") or r.get("component_raw",""),
+                        "metric":     r.get("metric_name",""),
+                        "value":      r.get("metric_value"),
+                        "unit":       r.get("metric_unit") or "",
+                        "narrative":  r.get("metric_narrative") or "",
+                        "in_spec":    r.get("within_spec"),
+                        "anomaly":    bool(r.get("anomaly_flag", False)),
+                    } for r in perf_rows])
+                    edited_perf = st.data_editor(
+                        perf_df,
+                        use_container_width=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "value":   st.column_config.NumberColumn("Value"),
+                            "in_spec": st.column_config.CheckboxColumn("In Spec?"),
+                            "anomaly": st.column_config.CheckboxColumn("Anomaly?"),
+                        },
+                        key="perf_editor",
+                    )
+                    for i, row in edited_perf.iterrows():
+                        if i < len(s["system_performance"]):
+                            s["system_performance"][i]["metric_name"]    = row["metric"]
+                            s["system_performance"][i]["metric_value"]   = row["value"]
+                            s["system_performance"][i]["metric_unit"]    = row["unit"] or None
+                            s["system_performance"][i]["metric_narrative"]= row["narrative"] or None
+                            s["system_performance"][i]["within_spec"]    = row["in_spec"]
+                            s["system_performance"][i]["anomaly_flag"]   = bool(row["anomaly"])
+                else:
+                    st.caption("No performance metrics extracted.")
+
+            # ── Action Items ──────────────────────────────────────────────────
+            ai_rows = s.get("action_items", [])
+            with st.expander(f"✅  ACTION ITEMS  ({len(ai_rows)} item{'s' if len(ai_rows)!=1 else ''})", expanded=True):
+                if ai_rows:
+                    ai_df = pd.DataFrame([{
+                        "action":       r.get("action_text",""),
+                        "responsible":  r.get("responsible") or "",
+                        "due_date":     r.get("due_date") or None,
+                        "time_ref":     r.get("time_reference") or "",
+                    } for r in ai_rows])
+                    edited_ai = st.data_editor(
+                        ai_df,
+                        use_container_width=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "due_date": st.column_config.DateColumn("Due Date"),
+                            "responsible": st.column_config.SelectboxColumn(
+                                "Responsible", options=[""] + TEAM_MEMBERS),
+                        },
+                        key="ai_editor",
+                    )
+                    for i, row in edited_ai.iterrows():
+                        if i < len(s["action_items"]):
+                            s["action_items"][i]["action_text"]  = row["action"]
+                            s["action_items"][i]["responsible"]  = row["responsible"] or None
+                            s["action_items"][i]["due_date"]     = row["due_date"]
+                else:
+                    st.caption("No action items extracted.")
+
+            # ── Save handler ──────────────────────────────────────────────────
             if do_save:
-                # Write edited values back to session state before saving
-                edited = {
-                    "activity_type":       f_activity,
-                    "summary":             f_summary,
-                    "system_performance":  f_sp,
-                    "maintenance_done":    f_md,
-                    "issues_found":        f_if,
-                    "action_items":        f_ai,
-                    "components_affected": f_ca,
-                    "duration_hours":      f_dur,
-                    "severity":            f_severity,
-                    "additional_notes":    f_an,
-                }
-                with st.spinner("Saving…"):
+                with st.spinner("Saving to all tables…"):
                     try:
-                        from db_logger import append_entry, ensure_schema
-                        ensure_schema()
-                        result = append_entry(
-                            edited,
-                            st.session_state.transcript,
-                            st.session_state.source_label or "Unknown",
-                            engineer,
-                            logged_at=f_date_recorded,  # None → NOW() in DB
+                        from db_logger import process_transcript
+                        result = process_transcript(
+                            structured   = st.session_state.structured_insights,
+                            raw_transcript = st.session_state.transcript,
+                            source_file  = st.session_state.source_label or "Unknown",
+                            engineer     = engineer,
+                            date_recorded= f_date_recorded,
                         )
-                        ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
-                        # Auto-create individual action item rows
-                        n_actions = 0
-                        if f_ai.strip():
-                            from db_logger import create_action_items_from_memo
-                            created = create_action_items_from_memo(
-                                result["id"], f_ai, engineer
+                        msg = (
+                            f"✅  Saved! Memo ID **{result['memo_id']}** — "
+                            f"{result['n_maintenance']} maintenance · "
+                            f"{result['n_observations']} observations · "
+                            f"{result['n_performance']} metrics · "
+                            f"{result['n_actions']} action items"
+                        )
+                        st.success(msg)
+                        if result.get("unmatched_components"):
+                            st.warning(
+                                "Unmatched components saved with no canonical link: "
+                                + ", ".join(result["unmatched_components"])
                             )
-                            n_actions = len(created)
-                        action_msg = f" + **{n_actions}** action item{'s' if n_actions != 1 else ''} created." if n_actions else ""
-                        st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}{action_msg}")
+                        st.session_state.structured_insights = None
                         _clear_entry()
                         st.cache_data.clear()
                         st.rerun()
@@ -690,6 +795,7 @@ if page == "New Entry":
                         st.error(f"Database error: {e}")
 
             if do_clear:
+                st.session_state.structured_insights = None
                 _clear_entry()
                 st.rerun()
 
@@ -1589,3 +1695,136 @@ Return only the JSON array of task objects."""
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Components":
+    import pandas as pd
+    from db_logger import fetch_components, upsert_component, fetch_unmatched_components
+
+    st.header("COMPONENTS")
+    st.caption("Canonical component registry. Add aliases so Weebo can recognise every name engineers use for the same part.")
+
+    # ── Unmatched components alert ────────────────────────────────────────────
+    try:
+        unmatched = fetch_unmatched_components()
+        if unmatched:
+            st.warning(
+                f"**{len(unmatched)} unmatched component string{'s' if len(unmatched)>1 else ''}** "
+                "found in logs — not linked to any canonical component. "
+                "Add them below or add aliases to existing components.",
+                icon="⚠️"
+            )
+            with st.expander("Show unmatched strings"):
+                um_df = pd.DataFrame(unmatched)
+                st.dataframe(um_df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.caption(f"Could not load unmatched components: {e}")
+
+    # ── Component list ────────────────────────────────────────────────────────
+    try:
+        components = fetch_components(include_inactive=True)
+    except Exception as e:
+        st.error(f"Could not load components: {e}")
+        components = []
+
+    st.subheader(f"REGISTRY  ({len(components)} components)")
+
+    for comp in components:
+        cid      = comp["id"]
+        active   = comp.get("active", True)
+        inactive_label = "" if active else "  [INACTIVE]"
+        aliases_str = ", ".join(comp.get("aliases") or [])
+
+        with st.expander(
+            f"**{comp['canonical_name']}**{inactive_label}  ·  "
+            f"{comp.get('part_number') or 'no part#'}  ·  "
+            f"{comp.get('category') or '—'}  ·  aliases: {aliases_str[:60] or 'none'}"
+        ):
+            with st.form(key=f"comp_form_{cid}"):
+                cf1, cf2 = st.columns(2)
+                fc_name  = cf1.text_input("Canonical Name *", value=comp["canonical_name"], key=f"cn_{cid}")
+                fc_part  = cf2.text_input("Part Number", value=comp.get("part_number") or "", key=f"pn_{cid}")
+                cf3, cf4 = st.columns(2)
+                fc_cat   = cf3.text_input("Category", value=comp.get("category") or "", key=f"cat_{cid}")
+                fc_sub   = cf4.text_input("Subsystem", value=comp.get("subsystem") or "", key=f"sub_{cid}")
+                # Aliases as comma-separated string for editing
+                aliases_edit = st.text_input(
+                    "Aliases (comma-separated — every name engineers might say)",
+                    value=", ".join(comp.get("aliases") or []),
+                    placeholder="hp pump, pump #3, HPP-03, high pressure pump",
+                    key=f"al_{cid}",
+                )
+                fc_notes  = st.text_input("Notes", value=comp.get("notes") or "", key=f"nt_{cid}")
+                fc_active = st.checkbox("Active", value=bool(active), key=f"act_{cid}")
+
+                bf1, bf2, _ = st.columns([1, 1, 4])
+                do_save_c = bf1.form_submit_button("Save", type="primary", use_container_width=True)
+
+            if do_save_c:
+                if not fc_name.strip():
+                    st.warning("Canonical name is required.")
+                else:
+                    try:
+                        new_aliases = [a.strip().lower() for a in aliases_edit.split(",") if a.strip()]
+                        upsert_component({
+                            "id":             cid,
+                            "canonical_name": fc_name.strip(),
+                            "part_number":    fc_part.strip() or None,
+                            "category":       fc_cat.strip() or None,
+                            "subsystem":      fc_sub.strip() or None,
+                            "aliases":        new_aliases,
+                            "notes":          fc_notes.strip() or None,
+                            "active":         fc_active,
+                        })
+                        # Force extractor to rebuild its alias cache
+                        from extractor import refresh_component_cache
+                        refresh_component_cache()
+                        st.success(f"Component '{fc_name}' saved.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ── Add new component ─────────────────────────────────────────────────────
+    st.divider()
+    with st.container(border=True):
+        st.subheader("ADD COMPONENT")
+        with st.form("add_component_form"):
+            nc1, nc2 = st.columns(2)
+            new_name  = nc1.text_input("Canonical Name *", placeholder="High Pressure Pump 3")
+            new_part  = nc2.text_input("Part Number",      placeholder="HPP-03")
+            nc3, nc4  = st.columns(2)
+            new_cat   = nc3.text_input("Category",   placeholder="Pump")
+            new_sub   = nc4.text_input("Subsystem",  placeholder="Hydraulics")
+            new_aliases = st.text_input(
+                "Aliases (comma-separated)",
+                placeholder="hp pump, pump #3, high pressure pump, hpp03",
+            )
+            new_notes = st.text_input("Notes")
+            do_add_c  = st.form_submit_button("Add Component", type="primary")
+
+        if do_add_c:
+            if not new_name.strip():
+                st.warning("Canonical name is required.")
+            else:
+                try:
+                    aliases_list = [a.strip().lower() for a in new_aliases.split(",") if a.strip()]
+                    upsert_component({
+                        "canonical_name": new_name.strip(),
+                        "part_number":    new_part.strip() or None,
+                        "category":       new_cat.strip() or None,
+                        "subsystem":      new_sub.strip() or None,
+                        "aliases":        aliases_list,
+                        "notes":          new_notes.strip() or None,
+                        "active":         True,
+                    })
+                    from extractor import refresh_component_cache
+                    refresh_component_cache()
+                    st.success(f"Component '{new_name}' added.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
