@@ -227,6 +227,18 @@ def ensure_schema():
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
+
+def _json_serial(obj):
+    """JSON serialiser for types not handled by default (date, datetime, Decimal)."""
+    import datetime as _dt
+    import decimal as _dec
+    if isinstance(obj, (_dt.date, _dt.datetime)):
+        return obj.isoformat()
+    if isinstance(obj, _dec.Decimal):
+        return float(obj)
+    raise TypeError(f"Type {type(obj)} not JSON serialisable")
+
+
 def _parse_duration(raw) -> float | None:
     if raw is None:
         return None
@@ -998,7 +1010,7 @@ def process_transcript(structured: dict, raw_transcript: str,
                     "severity":            top_sev,
                     "additional_notes":    "",
                     "raw_transcript":      raw_transcript,
-                    "raw_insights_json":   json.dumps(structured),
+                    "raw_insights_json":   json.dumps(structured, default=_json_serial),
                     "logged_at":           date_recorded,
                 }
                 cur.execute(INSERT_SQL, memo_row)
