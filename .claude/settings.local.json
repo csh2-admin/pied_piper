@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:/Users/PJCallahan/OneDrive - CSH2 Corp/Documents/GitHub/pied_piper/.claude/worktrees/suspicious-blackburn\" status)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(git --git-dir=\"C:/Users/PJCallahan/OneDrive - CSH2 Corp/Documents/GitHub/pied_piper/.git\" --work-tree=\"C:/Users/PJCallahan/OneDrive - CSH2 Corp/Documents/GitHub/pied_piper/.claude/worktrees/suspicious-blackburn\" status)",
+      "Bash(git -C \"/c/Users/PJCallahan/OneDrive - CSH2 Corp/Documents/GitHub/pied_piper/.claude/worktrees/suspicious-blackburn\" status)",
+      "Bash(gh pr:*)"
+    ]
+  }
+}

@@ -364,8 +364,6 @@ for k, v in {
     "audio_bytes":  None,
     "audio_suffix": ".wav",
     "chat_history": [],   # list of {"role": "user"|"assistant", "content": str, "sql": str|None, "rows": list|None}
-    "structured_insights": None,   # output from extract_structured()
-    "review_items": [],         # flat list of items for Step 4 review
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -406,61 +404,6 @@ def _load_actions(eng, status, search):
         search   = search or "",
     )
 
-
-
-
-REVIEW_CATEGORIES = ["Maintenance", "Observation", "Performance", "Action Item"]
-
-def _to_flat_items(structured):
-    """Flatten the 4-category structured dict into a single list for review."""
-    items = []
-    for r in structured.get("maintenance_performed", []):
-        items.append({**r, "_category": "Maintenance",
-                      "_text": r.get("activity_performed", "")})
-    for r in structured.get("qualitative_observations", []):
-        items.append({**r, "_category": "Observation",
-                      "_text": r.get("observation", "")})
-    for r in structured.get("system_performance", []):
-        label = r.get("metric_name", "")
-        if r.get("metric_value") is not None:
-            label += f" = {r['metric_value']} {r.get('metric_unit') or ''}".rstrip()
-        elif r.get("metric_narrative"):
-            label = r["metric_narrative"]
-        items.append({**r, "_category": "Performance", "_text": label})
-    for r in structured.get("action_items", []):
-        items.append({**r, "_category": "Action Item",
-                      "_text": r.get("action_text", "")})
-    return items
-
-
-def _from_flat_items(items):
-    """Re-assemble flat review list back into structured dict for process_transcript."""
-    out = {
-        "maintenance_performed":    [],
-        "qualitative_observations": [],
-        "system_performance":       [],
-        "action_items":             [],
-    }
-    for item in items:
-        cat = item.get("_category", "Observation")
-        # Strip internal keys before storing
-        r = {k: v for k, v in item.items() if not k.startswith("_")}
-        if cat == "Maintenance":
-            # Ensure required field present
-            if "_text" in item:
-                r["activity_performed"] = r.get("activity_performed") or item["_text"]
-            out["maintenance_performed"].append(r)
-        elif cat == "Observation":
-            if "_text" in item:
-                r["observation"] = r.get("observation") or item["_text"]
-            out["qualitative_observations"].append(r)
-        elif cat == "Performance":
-            out["system_performance"].append(r)
-        elif cat == "Action Item":
-            if "_text" in item:
-                r["action_text"] = r.get("action_text") or item["_text"]
-            out["action_items"].append(r)
-    return out
 
 def _clear_entry():
     st.session_state.transcript   = ""
@@ -545,7 +488,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["New Entry", "Records", "Actions", "Gantt", "Ask Weebo", "Components"],
+        ["New Entry", "Records", "Actions", "Gantt", "Sensor View", "Ask Weebo"],
         label_visibility="collapsed",
     )
 
@@ -630,250 +573,116 @@ if page == "New Entry":
     with st.container(border=True):
         st.subheader("STEP 3 — EXTRACT WITH WEEBO")
 
-        if st.button("✨  Extract & Structure",
+        if st.button("✨  Extract Insights",
                      disabled=not st.session_state.transcript.strip(),
                      type="primary"):
             with st.spinner("Sending to Weebo…"):
                 try:
-                    from extractor import extract_structured
-                    structured = extract_structured(st.session_state.transcript)
-                    st.session_state.structured_insights = structured
-                    st.session_state.review_items = _to_flat_items(structured)
-                    st.success("Extraction complete — review and edit below before saving.")
+                    from extractor import extract_insights
+                    st.session_state.insights = extract_insights(st.session_state.transcript)
+                    st.success("Extraction complete — review below.")
                 except Exception as e:
                     st.error(f"Extraction error: {e}")
 
-        if st.session_state.review_items:
-            items = st.session_state.review_items
-            counts = {c: sum(1 for x in items if x["_category"] == c) for c in REVIEW_CATEGORIES}
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Maintenance",  counts["Maintenance"])
-            mc2.metric("Observations", counts["Observation"])
-            mc3.metric("Performance",  counts["Performance"])
-            mc4.metric("Action Items", counts["Action Item"])
-            s = st.session_state.structured_insights or {}
-            if s.get("unmatched_components"):
-                st.warning(
-                    "⚠️ Unmatched components: "
-                    + ", ".join(s["unmatched_components"])
-                    + " — go to Components page to register them.",
-                    icon="⚠️",
-                )
+        if st.session_state.insights:
+            st.success("Extraction complete — review and edit fields below before saving.")
 
     # ── Step 4: Review, Edit & Save ───────────────────────────────────────────
     with st.container(border=True):
         st.subheader("STEP 4 — REVIEW, EDIT & SAVE")
 
-        if not st.session_state.review_items:
+        if not st.session_state.insights:
             st.caption("Extract insights first to unlock this section.")
         else:
-            # Load component list once for all dropdowns
-            try:
-                from db_logger import fetch_components
-                _comp_rows = fetch_components()
-                _comp_names = [""] + [r["canonical_name"] for r in _comp_rows]
-            except Exception:
-                _comp_rows  = []
-                _comp_names = [""]
+            ins = st.session_state.insights
 
-            # Date + save controls
-            s4c1, s4c2, s4c3 = st.columns([2, 1, 1])
-            f_date_recorded = s4c1.date_input(
-                "Date Recorded",
-                value=None,
-                help="Leave blank for today. Set a past date for historical entries.",
-                key="date_recorded",
-            )
-            do_save  = s4c2.button("💾  Save All", type="primary", use_container_width=True, key="do_save_s4")
-            do_clear = s4c3.button("🗑  Clear",    use_container_width=True, key="do_clear_s4")
+            # ── Editable fields form ──────────────────────────────────────────
+            with st.form("edit_insights_form"):
+                st.markdown("##### Review extracted fields — edit anything before saving")
 
-            st.divider()
+                # Row 1: Activity type + Severity side by side (dropdowns)
+                r1c1, r1c2 = st.columns(2)
+                cur_act = ins.get("activity_type","Other") or "Other"
+                act_idx = ACTIVITY_OPTIONS.index(cur_act) if cur_act in ACTIVITY_OPTIONS else 4
+                f_activity = r1c1.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx)
 
-            # ── Per-item review cards ─────────────────────────────────────────
-            items = st.session_state.review_items
-            to_delete = []
+                cur_sev = ins.get("severity","None") or "None"
+                sev_idx = SEVERITY_OPTIONS.index(cur_sev) if cur_sev in SEVERITY_OPTIONS else 4
+                f_severity = r1c2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_idx)
 
-            for idx, item in enumerate(items):
-                cat    = item.get("_category", "Observation")
-                text   = item.get("_text", "")
-                comp_c = item.get("component_canonical") or ""
-                comp_r = item.get("component_raw") or ""
-                comp_display = comp_c or comp_r or "—"
+                # Summary — full width
+                f_summary = st.text_area("Summary",
+                    value=ins.get("summary","") or "", height=75)
 
-                CAT_ICON = {
-                    "Maintenance": "🔧",
-                    "Observation": "👁",
-                    "Performance": "📊",
-                    "Action Item": "✅",
-                }
-                icon = CAT_ICON.get(cat, "•")
-                exp_label = f"{icon}  **[{cat}]**  {text[:80]}{'…' if len(text)>80 else ''}  ·  _{comp_display}_"
+                # Row 2: two-column text areas
+                c1, c2 = st.columns(2)
+                f_sp   = c1.text_area("System Performance",
+                    value=ins.get("system_performance","") or "", height=100)
+                f_md   = c1.text_area("Maintenance Done",
+                    value=ins.get("maintenance_done","") or "", height=100)
+                f_if   = c1.text_area("Issues Found",
+                    value=ins.get("issues_found","") or "", height=100)
+                f_ai   = c2.text_area("Action Items",
+                    value=ins.get("action_items","") or "", height=100)
+                f_ca   = c2.text_input("Components Affected",
+                    value=ins.get("components_affected","") or "")
+                f_dur  = c2.text_input("Duration (hrs)",
+                    value=str(ins.get("duration_hours","") or ""))
+                f_an   = st.text_area("Additional Notes",
+                    value=ins.get("additional_notes","") or "", height=75)
 
-                with st.expander(exp_label, expanded=False):
-                    col_cat, col_comp = st.columns([1, 2])
+                st.divider()
+                dc1, dc2 = st.columns([1, 2])
+                f_date_recorded = dc1.date_input(
+                    "Date Recorded",
+                    value=None,
+                    help="Leave blank to use today's date. Set a past date to log a historical entry.",
+                    key="date_recorded",
+                )
+                dc2.caption("Leave blank to record as today. Set a past date for historical entries.")
+                sc1, sc2 = st.columns([1, 1])
+                do_save  = sc1.form_submit_button("💾  Save to Database",
+                                                  type="primary",
+                                                  use_container_width=True)
+                do_clear = sc2.form_submit_button("🗑  Clear all",
+                                                  use_container_width=True)
 
-                    # Category selector
-                    cat_idx = REVIEW_CATEGORIES.index(cat) if cat in REVIEW_CATEGORIES else 0
-                    new_cat = col_cat.selectbox(
-                        "Category",
-                        REVIEW_CATEGORIES,
-                        index=cat_idx,
-                        key=f"cat_{idx}",
-                    )
-                    item["_category"] = new_cat
-
-                    # Component selector
-                    # Show canonical list; if current value not in list, add it as option
-                    comp_opts = list(_comp_names)
-                    cur_comp_val = comp_c  # use canonical if set
-                    if cur_comp_val and cur_comp_val not in comp_opts:
-                        comp_opts.append(cur_comp_val)
-                    comp_idx = comp_opts.index(cur_comp_val) if cur_comp_val in comp_opts else 0
-                    new_comp = col_comp.selectbox(
-                        "Component",
-                        comp_opts,
-                        index=comp_idx,
-                        key=f"comp_{idx}",
-                    )
-                    item["component_canonical"] = new_comp or None
-                    # Preserve raw if no canonical selected
-                    if not new_comp and comp_r:
-                        item["component_raw"] = comp_r
-
-                    # ── Category-specific fields ──────────────────────────────
-                    if new_cat == "Maintenance":
-                        f1, f2, f3 = st.columns([3, 1, 1])
-                        item["activity_performed"] = f1.text_area(
-                            "Activity Performed",
-                            value=item.get("activity_performed") or text,
-                            height=70,
-                            key=f"mact_{idx}",
-                        )
-                        item["_text"] = item["activity_performed"]
-                        sev_opts = SEVERITY_OPTIONS
-                        sev_i = sev_opts.index(item.get("severity","None")) if item.get("severity") in sev_opts else 4
-                        item["severity"] = f2.selectbox("Severity", sev_opts, index=sev_i, key=f"msev_{idx}")
-                        item["duration_hours"] = f3.number_input(
-                            "Hours", value=float(item.get("duration_hours") or 0),
-                            min_value=0.0, step=0.25, key=f"mdur_{idx}"
-                        ) or None
-                        out_opts = ["", "resolved", "monitoring", "escalated"]
-                        out_i = out_opts.index(item.get("outcome") or "") if (item.get("outcome") or "") in out_opts else 0
-                        item["outcome"] = st.selectbox("Outcome", out_opts, index=out_i, key=f"mout_{idx}") or None
-
-                    elif new_cat == "Observation":
-                        item["observation"] = st.text_area(
-                            "Observation",
-                            value=item.get("observation") or text,
-                            height=70,
-                            key=f"oobs_{idx}",
-                        )
-                        item["_text"] = item["observation"]
-                        oc1, oc2, oc3 = st.columns(3)
-                        type_opts = ["anomaly","degradation","normal","informational","concern"]
-                        type_i = type_opts.index(item.get("observation_type","informational")) if item.get("observation_type") in type_opts else 3
-                        item["observation_type"] = oc1.selectbox("Type", type_opts, index=type_i, key=f"otyp_{idx}")
-                        sev_i = SEVERITY_OPTIONS.index(item.get("severity","None")) if item.get("severity") in SEVERITY_OPTIONS else 4
-                        item["severity"] = oc2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_i, key=f"osev_{idx}")
-                        item["follow_up_required"] = oc3.checkbox("Follow Up Required",
-                            value=bool(item.get("follow_up_required", False)), key=f"ofu_{idx}")
-
-                    elif new_cat == "Performance":
-                        pc1, pc2, pc3 = st.columns([2, 1, 1])
-                        item["metric_name"] = pc1.text_input(
-                            "Metric",
-                            value=item.get("metric_name",""),
-                            key=f"pmn_{idx}",
-                        )
-                        item["_text"] = item["metric_name"]
-                        item["metric_value"] = pc2.number_input(
-                            "Value",
-                            value=float(item.get("metric_value") or 0),
-                            key=f"pmv_{idx}",
-                        ) or None
-                        item["metric_unit"] = pc3.text_input(
-                            "Unit",
-                            value=item.get("metric_unit") or "",
-                            key=f"pmu_{idx}",
-                        ) or None
-                        pc4, pc5, pc6 = st.columns(3)
-                        item["metric_narrative"] = pc4.text_input(
-                            "Narrative (if no numeric)",
-                            value=item.get("metric_narrative") or "",
-                            key=f"pnar_{idx}",
-                        ) or None
-                        item["within_spec"] = pc5.selectbox(
-                            "Within Spec",
-                            [None, True, False],
-                            index=[None, True, False].index(item.get("within_spec")),
-                            format_func=lambda x: "Unknown" if x is None else ("Yes" if x else "No"),
-                            key=f"pws_{idx}",
-                        )
-                        item["anomaly_flag"] = pc6.checkbox(
-                            "Anomaly", value=bool(item.get("anomaly_flag", False)), key=f"pan_{idx}"
-                        )
-
-                    elif new_cat == "Action Item":
-                        item["action_text"] = st.text_area(
-                            "Action",
-                            value=item.get("action_text") or text,
-                            height=70,
-                            key=f"aat_{idx}",
-                        )
-                        item["_text"] = item["action_text"]
-                        ac1, ac2 = st.columns(2)
-                        resp_opts = [""] + TEAM_MEMBERS
-                        resp_i = resp_opts.index(item.get("responsible") or "") if (item.get("responsible") or "") in resp_opts else 0
-                        item["responsible"] = ac1.selectbox("Responsible", resp_opts, index=resp_i, key=f"aresp_{idx}") or None
-                        item["due_date"] = ac2.date_input("Due Date", value=item.get("due_date"), key=f"adue_{idx}")
-                        if item.get("time_reference"):
-                            st.caption(f"Time reference: _{item['time_reference']}_")
-
-                    # Delete button
-                    if st.button("🗑  Remove this item", key=f"del_{idx}", use_container_width=False):
-                        to_delete.append(idx)
-
-            # Process deletions
-            if to_delete:
-                st.session_state.review_items = [
-                    x for i, x in enumerate(items) if i not in to_delete
-                ]
-                st.rerun()
-
-            # ── Save ─────────────────────────────────────────────────────────
             if do_save:
-                with st.spinner("Saving to all tables…"):
+                # Write edited values back to session state before saving
+                edited = {
+                    "activity_type":       f_activity,
+                    "summary":             f_summary,
+                    "system_performance":  f_sp,
+                    "maintenance_done":    f_md,
+                    "issues_found":        f_if,
+                    "action_items":        f_ai,
+                    "components_affected": f_ca,
+                    "duration_hours":      f_dur,
+                    "severity":            f_severity,
+                    "additional_notes":    f_an,
+                }
+                with st.spinner("Saving…"):
                     try:
-                        from db_logger import process_transcript
-                        # Re-assemble structured from current review state
-                        final_structured = _from_flat_items(st.session_state.review_items)
-                        # Preserve unmatched from original extraction
-                        final_structured["unmatched_components"] = (
-                            st.session_state.structured_insights or {}
-                        ).get("unmatched_components", [])
-
-                        result = process_transcript(
-                            structured    = final_structured,
-                            raw_transcript= st.session_state.transcript,
-                            source_file   = st.session_state.source_label or "Unknown",
-                            engineer      = engineer,
-                            date_recorded = f_date_recorded,
+                        from db_logger import append_entry, ensure_schema
+                        ensure_schema()
+                        result = append_entry(
+                            edited,
+                            st.session_state.transcript,
+                            st.session_state.source_label or "Unknown",
+                            engineer,
+                            logged_at=f_date_recorded,  # None → NOW() in DB
                         )
-                        msg = (
-                            f"✅  Saved! Memo ID **{result['memo_id']}** — "
-                            f"{result['n_maintenance']} maintenance · "
-                            f"{result['n_observations']} observations · "
-                            f"{result['n_performance']} metrics · "
-                            f"{result['n_actions']} action items"
-                        )
-                        st.success(msg)
-                        if result.get("unmatched_components"):
-                            st.warning(
-                                "Unmatched components saved without canonical link: "
-                                + ", ".join(result["unmatched_components"])
+                        ts = result["logged_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+                        # Auto-create individual action item rows
+                        n_actions = 0
+                        if f_ai.strip():
+                            from db_logger import create_action_items_from_memo
+                            created = create_action_items_from_memo(
+                                result["id"], f_ai, engineer
                             )
-                        st.session_state.structured_insights = None
-                        st.session_state.review_items = []
+                            n_actions = len(created)
+                        action_msg = f" + **{n_actions}** action item{'s' if n_actions != 1 else ''} created." if n_actions else ""
+                        st.success(f"✅  Saved! Row ID **{result['id']}** — {ts}{action_msg}")
                         _clear_entry()
                         st.cache_data.clear()
                         st.rerun()
@@ -881,42 +690,35 @@ if page == "New Entry":
                         st.error(f"Database error: {e}")
 
             if do_clear:
-                st.session_state.structured_insights = None
-                st.session_state.review_items = []
                 _clear_entry()
                 st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE: RECORDS# ─────────────────────────────────────────────────────────────────────────────
 # PAGE: RECORDS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "Records":
-    import pandas as pd
-    from db_logger import (fetch_maintenance_logs, fetch_observation_logs,
-                           fetch_performance_logs)
-
     st.header("RECORDS")
 
-    # ── Shared filters ────────────────────────────────────────────────────────
+    # ── Filters ───────────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("FILTERS")
-        fc1, fc2, fc3 = st.columns(3)
-        f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS, key="rec_eng")
-        f_srch = fc2.text_input("Keyword search", placeholder="component, activity, metric…", key="rec_srch")
-        f_log_type = fc3.selectbox(
-            "Log Type",
-            ["Maintenance", "Observations", "Performance", "Legacy (memo_log)"],
-            key="rec_logtype",
-        )
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS)
+        f_act  = fc2.selectbox("Activity Type", ["All types"] + ACTIVITY_OPTIONS)
+        f_sev  = fc3.selectbox("Severity",  ["All severities"] + SEVERITY_OPTIONS)
+        f_srch = fc4.text_input("Keyword search",
+                                placeholder="summary, issues, components…")
+
         fd1, fd2, fd3 = st.columns(3)
-        f_from = fd1.date_input("From", value=None, key="rec_from")
-        f_to   = fd2.date_input("To",   value=None, key="rec_to")
+        f_from = fd1.date_input("From", value=None)
+        f_to   = fd2.date_input("To",   value=None)
         with fd3:
-            st.write(""); st.write("")
-            rc1, rc2 = st.columns(2)
-            do_apply = rc1.button("Apply",         type="primary", use_container_width=True, key="rec_apply")
-            do_clear = rc2.button("Clear filters",                 use_container_width=True, key="rec_clear")
+            st.write("")
+            st.write("")
+            ac1, ac2 = st.columns(2)
+            do_apply = ac1.button("Apply",  type="primary",   use_container_width=True)
+            do_clear = ac2.button("Clear filters",            use_container_width=True)
 
     if do_clear:
         st.cache_data.clear()
@@ -924,141 +726,52 @@ elif page == "Records":
     if do_apply:
         st.cache_data.clear()
 
-    eng_filter  = "" if f_eng  == "All engineers" else f_eng
-    srch_filter = f_srch or ""
-    from_str    = str(f_from) if f_from else ""
-    to_str      = str(f_to)   if f_to   else ""
+    # ── Fetch ─────────────────────────────────────────────────────────────────
+    try:
+        rows = _load_records(f_eng, f_act, f_sev, f_srch, f_from, f_to)
+    except Exception as e:
+        st.error(f"Could not load records: {e}")
+        rows = []
 
-    # ── MAINTENANCE ───────────────────────────────────────────────────────────
-    if f_log_type == "Maintenance":
-        try:
-            rows = fetch_maintenance_logs(eng_filter, srch_filter, from_str, to_str)
-        except Exception as e:
-            st.error(f"Could not load maintenance logs: {e}"); rows = []
+    # ── Toolbar ───────────────────────────────────────────────────────────────
+    tc1, tc2 = st.columns([4, 1])
+    tc1.caption(f"**{len(rows)}** record{'s' if len(rows) != 1 else ''}")
 
-        st.caption(f"**{len(rows)}** maintenance record{'s' if len(rows)!=1 else ''}")
-        st.divider()
+    if tc2.button("📊  Export Excel", use_container_width=True):
         if not rows:
-            st.info("No maintenance records match your filters.", icon="ℹ️")
+            st.warning("No records to export.")
         else:
-            for row in rows:
-                ts     = row.get("date_recorded")
-                ts_str = ts.strftime("%Y-%m-%d  %H:%M") if hasattr(ts,"strftime") else str(ts)
-                sev    = row.get("severity","") or ""
-                badge  = SEV_BADGE.get(sev,"⚪")
-                comp   = row.get("component_canonical") or row.get("component_raw","—")
-                act    = (row.get("activity_performed") or "")[:80]
-                with st.expander(f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {comp}  ·  {act}"):
-                    c1, c2 = st.columns(2)
-                    c1.markdown(f"**Component:** {comp}")
-                    c1.markdown(f"**Activity:** {row.get('activity_performed','')}")
-                    c1.markdown(f"**Duration:** {row.get('duration_hours') or '—'} hrs")
-                    c2.markdown(f"**Severity:** {sev or '—'}")
-                    c2.markdown(f"**Outcome:** {row.get('outcome') or '—'}")
-                    c2.markdown(f"**Engineer:** {row.get('engineer','')}")
+            try:
+                from excel_export import export_to_excel
+                with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                    export_to_excel(rows, tmp.name)
+                    excel_bytes = open(tmp.name, "rb").read()
+                fname = f"memo_log_{datetime.now():%Y%m%d_%H%M}.xlsx"
+                st.download_button(
+                    "⬇️  Download Excel",
+                    data=excel_bytes, file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            except Exception as e:
+                st.error(f"Export error: {e}")
 
-    # ── OBSERVATIONS ──────────────────────────────────────────────────────────
-    elif f_log_type == "Observations":
-        try:
-            rows = fetch_observation_logs(eng_filter, srch_filter, from_str, to_str)
-        except Exception as e:
-            st.error(f"Could not load observation logs: {e}"); rows = []
+    # ── Records list ──────────────────────────────────────────────────────────
+    st.divider()
+    if not rows:
+        st.info("No records match your filters.", icon="ℹ️")
+    else:
+        for row in rows:
+            ts    = row.get("logged_at")
+            ts_str= ts.strftime("%Y-%m-%d  %H:%M UTC") if hasattr(ts,"strftime") else str(ts)
+            sev   = row.get("severity","") or ""
+            badge = SEV_BADGE.get(sev,"⚪")
+            summary_preview = (row.get("summary") or "")[:90]
 
-        st.caption(f"**{len(rows)}** observation record{'s' if len(rows)!=1 else ''}")
-        st.divider()
-        if not rows:
-            st.info("No observations match your filters.", icon="ℹ️")
-        else:
-            for row in rows:
-                ts     = row.get("date_recorded")
-                ts_str = ts.strftime("%Y-%m-%d  %H:%M") if hasattr(ts,"strftime") else str(ts)
-                sev    = row.get("severity","") or ""
-                badge  = SEV_BADGE.get(sev,"⚪")
-                comp   = row.get("component_canonical") or row.get("component_raw","—")
-                obs    = (row.get("observation") or "")[:80]
-                fu     = "⚠️ Follow-up required" if row.get("follow_up_required") else ""
-                with st.expander(f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {comp}  ·  {obs}"):
-                    c1, c2 = st.columns(2)
-                    c1.markdown(f"**Component:** {comp}")
-                    c1.markdown(f"**Observation:** {row.get('observation','')}")
-                    c1.markdown(f"**Type:** {row.get('observation_type','—')}")
-                    c2.markdown(f"**Severity:** {sev or '—'}")
-                    c2.markdown(f"**Engineer:** {row.get('engineer','')}")
-                    if fu:
-                        c2.warning(fu)
-
-    # ── PERFORMANCE ───────────────────────────────────────────────────────────
-    elif f_log_type == "Performance":
-        try:
-            rows = fetch_performance_logs(eng_filter, srch_filter, from_str, to_str)
-        except Exception as e:
-            st.error(f"Could not load performance logs: {e}"); rows = []
-
-        st.caption(f"**{len(rows)}** performance record{'s' if len(rows)!=1 else ''}")
-
-        # Summary dataframe at top for quick scanning
-        if rows:
-            pdf = pd.DataFrame([{
-                "date":      r.get("date_recorded").strftime("%Y-%m-%d") if hasattr(r.get("date_recorded"),"strftime") else str(r.get("date_recorded","")),
-                "engineer":  r.get("engineer",""),
-                "component": r.get("component_canonical") or r.get("component_raw",""),
-                "metric":    r.get("metric_name",""),
-                "value":     r.get("metric_value"),
-                "unit":      r.get("metric_unit",""),
-                "anomaly":   "⚠️" if r.get("anomaly_flag") else "",
-                "in_spec":   "✅" if r.get("within_spec") == True else ("❌" if r.get("within_spec") == False else "—"),
-            } for r in rows])
-            st.dataframe(pdf, use_container_width=True, hide_index=True,
-                         column_config={
-                             "value": st.column_config.NumberColumn("Value"),
-                             "anomaly": st.column_config.TextColumn("⚠️"),
-                             "in_spec": st.column_config.TextColumn("In Spec"),
-                         })
-        else:
-            st.info("No performance records match your filters.", icon="ℹ️")
-
-    # ── LEGACY (memo_log) ─────────────────────────────────────────────────────
-    elif f_log_type == "Legacy (memo_log)":
-        try:
-            rows = _load_records(
-                "" if f_eng == "All engineers" else f_eng,
-                "", "",  # no activity_type or severity filter
-                srch_filter, f_from, f_to,
-            )
-        except Exception as e:
-            st.error(f"Could not load records: {e}"); rows = []
-
-        tc1, tc2 = st.columns([4, 1])
-        tc1.caption(f"**{len(rows)}** record{'s' if len(rows)!=1 else ''}")
-        if tc2.button("📊  Export Excel", use_container_width=True, key="rec_export"):
-            if not rows:
-                st.warning("No records to export.")
-            else:
-                try:
-                    from excel_export import export_to_excel
-                    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-                        export_to_excel(rows, tmp.name)
-                        excel_bytes = open(tmp.name, "rb").read()
-                    fname = f"memo_log_{datetime.now():%Y%m%d_%H%M}.xlsx"
-                    st.download_button("⬇️  Download Excel", data=excel_bytes, file_name=fname,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except Exception as e:
-                    st.error(f"Export error: {e}")
-
-        st.divider()
-        if not rows:
-            st.info("No records match your filters.", icon="ℹ️")
-        else:
-            for row in rows:
-                ts     = row.get("logged_at")
-                ts_str = ts.strftime("%Y-%m-%d  %H:%M UTC") if hasattr(ts,"strftime") else str(ts)
-                sev    = row.get("severity","") or ""
-                badge  = SEV_BADGE.get(sev,"⚪")
-                summary_preview = (row.get("summary") or "")[:90]
-                with st.expander(
-                    f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {summary_preview}"
-                ):
-                    _edit_row(row)
+            act_label = row.get("activity_type","") or ""
+            with st.expander(
+                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}  ·  {summary_preview}"
+            ):
+                _edit_row(row)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1879,133 +1592,232 @@ Return only the JSON array of task objects."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE: COMPONENTS
+# PAGE: SENSOR VIEW
 # ─────────────────────────────────────────────────────────────────────────────
-elif page == "Components":
+elif page == "Sensor View":
     import pandas as pd
-    from db_logger import fetch_components, upsert_component, fetch_unmatched_components
+    import plotly.graph_objects as go
+    from datetime import datetime, timedelta, timezone
+    from db_logger import fetch_sensor_data, fetch_observations_in_window
 
-    st.header("COMPONENTS")
-    st.caption("Canonical component registry. Add aliases so Weebo can recognise every name engineers use for the same part.")
+    st.header("SENSOR VIEW")
+    st.caption("Process tag data with qualitative observation overlays from voice memos.")
 
-    # ── Unmatched components alert ────────────────────────────────────────────
-    try:
-        unmatched = fetch_unmatched_components()
-        if unmatched:
-            st.warning(
-                f"**{len(unmatched)} unmatched component string{'s' if len(unmatched)>1 else ''}** "
-                "found in logs — not linked to any canonical component. "
-                "Add them below or add aliases to existing components.",
-                icon="⚠️"
-            )
-            with st.expander("Show unmatched strings"):
-                um_df = pd.DataFrame(unmatched)
-                st.dataframe(um_df, use_container_width=True, hide_index=True)
-    except Exception as e:
-        st.caption(f"Could not load unmatched components: {e}")
+    # ── Time window ───────────────────────────────────────────────────────────
+    now_utc = datetime.now(timezone.utc)
+    default_start = now_utc - timedelta(hours=4)
 
-    # ── Component list ────────────────────────────────────────────────────────
-    try:
-        components = fetch_components(include_inactive=True)
-    except Exception as e:
-        st.error(f"Could not load components: {e}")
-        components = []
-
-    st.subheader(f"REGISTRY  ({len(components)} components)")
-
-    for comp in components:
-        cid      = comp["id"]
-        active   = comp.get("active", True)
-        inactive_label = "" if active else "  [INACTIVE]"
-        aliases_str = ", ".join(comp.get("aliases") or [])
-
-        with st.expander(
-            f"**{comp['canonical_name']}**{inactive_label}  ·  "
-            f"{comp.get('part_number') or 'no part#'}  ·  "
-            f"{comp.get('category') or '—'}  ·  aliases: {aliases_str[:60] or 'none'}"
-        ):
-            with st.form(key=f"comp_form_{cid}"):
-                cf1, cf2 = st.columns(2)
-                fc_name  = cf1.text_input("Canonical Name *", value=comp["canonical_name"], key=f"cn_{cid}")
-                fc_part  = cf2.text_input("Part Number", value=comp.get("part_number") or "", key=f"pn_{cid}")
-                cf3, cf4 = st.columns(2)
-                fc_cat   = cf3.text_input("Category", value=comp.get("category") or "", key=f"cat_{cid}")
-                fc_sub   = cf4.text_input("Subsystem", value=comp.get("subsystem") or "", key=f"sub_{cid}")
-                # Aliases as comma-separated string for editing
-                aliases_edit = st.text_input(
-                    "Aliases (comma-separated — every name engineers might say)",
-                    value=", ".join(comp.get("aliases") or []),
-                    placeholder="hp pump, pump #3, HPP-03, high pressure pump",
-                    key=f"al_{cid}",
-                )
-                fc_notes  = st.text_input("Notes", value=comp.get("notes") or "", key=f"nt_{cid}")
-                fc_active = st.checkbox("Active", value=bool(active), key=f"act_{cid}")
-
-                bf1, bf2, _ = st.columns([1, 1, 4])
-                do_save_c = bf1.form_submit_button("Save", type="primary", use_container_width=True)
-
-            if do_save_c:
-                if not fc_name.strip():
-                    st.warning("Canonical name is required.")
-                else:
-                    try:
-                        new_aliases = [a.strip().lower() for a in aliases_edit.split(",") if a.strip()]
-                        upsert_component({
-                            "id":             cid,
-                            "canonical_name": fc_name.strip(),
-                            "part_number":    fc_part.strip() or None,
-                            "category":       fc_cat.strip() or None,
-                            "subsystem":      fc_sub.strip() or None,
-                            "aliases":        new_aliases,
-                            "notes":          fc_notes.strip() or None,
-                            "active":         fc_active,
-                        })
-                        # Force extractor to rebuild its alias cache
-                        from extractor import refresh_component_cache
-                        refresh_component_cache()
-                        st.success(f"Component '{fc_name}' saved.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-
-    # ── Add new component ─────────────────────────────────────────────────────
-    st.divider()
     with st.container(border=True):
-        st.subheader("ADD COMPONENT")
-        with st.form("add_component_form"):
-            nc1, nc2 = st.columns(2)
-            new_name  = nc1.text_input("Canonical Name *", placeholder="High Pressure Pump 3")
-            new_part  = nc2.text_input("Part Number",      placeholder="HPP-03")
-            nc3, nc4  = st.columns(2)
-            new_cat   = nc3.text_input("Category",   placeholder="Pump")
-            new_sub   = nc4.text_input("Subsystem",  placeholder="Hydraulics")
-            new_aliases = st.text_input(
-                "Aliases (comma-separated)",
-                placeholder="hp pump, pump #3, high pressure pump, hpp03",
-            )
-            new_notes = st.text_input("Notes")
-            do_add_c  = st.form_submit_button("Add Component", type="primary")
+        st.subheader("TIME WINDOW  (UTC)")
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        sv_sd = tc1.date_input("Start Date", value=default_start.date(), key="sv_sd")
+        sv_st = tc2.time_input("Start Time", value=default_start.replace(second=0, microsecond=0).time(), key="sv_st")
+        sv_ed = tc3.date_input("End Date",   value=now_utc.date(), key="sv_ed")
+        sv_et = tc4.time_input("End Time",   value=now_utc.replace(second=0, microsecond=0).time(), key="sv_et")
 
-        if do_add_c:
-            if not new_name.strip():
-                st.warning("Canonical name is required.")
+    start_dt = datetime(sv_sd.year, sv_sd.month, sv_sd.day,
+                        sv_st.hour, sv_st.minute, tzinfo=timezone.utc)
+    end_dt   = datetime(sv_ed.year, sv_ed.month, sv_ed.day,
+                        sv_et.hour, sv_et.minute, tzinfo=timezone.utc)
+
+    duration = end_dt - start_dt
+    if duration.total_seconds() > 0:
+        if duration > timedelta(hours=4):
+            res_label = "15-sec aggregates"
+        elif duration >= timedelta(minutes=31):
+            res_label = "1-sec aggregates"
+        else:
+            res_label = "raw data"
+        st.caption(f"Window: {duration}  ·  Resolution: {res_label}")
+
+    # ── Tag configuration ─────────────────────────────────────────────────────
+    if "sv_tags" not in st.session_state:
+        st.session_state.sv_tags = [
+            {"db_name": "M130_RefFreq", "display": "MC130_SP",  "scale": round(5.0 / 3, 4)},
+            {"db_name": "AO_AOV140",    "display": "AOV140_SP", "scale": 1.0},
+        ]
+
+    with st.container(border=True):
+        st.subheader("TAGS")
+        st.caption("DB Tag Name  ·  Display Label  ·  Scale Factor")
+
+        # Column headers
+        hc1, hc2, hc3, hc4 = st.columns([3, 3, 2, 1])
+        hc1.markdown("**DB Tag Name**")
+        hc2.markdown("**Display Label**")
+        hc3.markdown("**Scale Factor**")
+
+        tags_to_remove = []
+        for i, tag in enumerate(st.session_state.sv_tags):
+            rc1, rc2, rc3, rc4 = st.columns([3, 3, 2, 1])
+            new_db    = rc1.text_input("db",    value=tag["db_name"], key=f"sv_db_{i}",    label_visibility="collapsed")
+            new_disp  = rc2.text_input("disp",  value=tag["display"],  key=f"sv_disp_{i}",  label_visibility="collapsed")
+            new_scale = rc3.number_input("scale", value=float(tag["scale"]), key=f"sv_scale_{i}",
+                                         step=0.0001, format="%.4f", label_visibility="collapsed")
+            if rc4.button("✕", key=f"sv_rm_{i}", use_container_width=True):
+                tags_to_remove.append(i)
+            st.session_state.sv_tags[i] = {"db_name": new_db, "display": new_disp, "scale": new_scale}
+
+        for idx in sorted(tags_to_remove, reverse=True):
+            st.session_state.sv_tags.pop(idx)
+            st.rerun()
+
+        if st.button("＋  Add Tag", key="sv_add"):
+            st.session_state.sv_tags.append({"db_name": "", "display": "", "scale": 1.0})
+            st.rerun()
+
+    # ── Fetch button ──────────────────────────────────────────────────────────
+    sv_fetch = st.button("FETCH DATA", type="primary", key="sv_fetch")
+
+    if "sv_result" not in st.session_state:
+        st.session_state.sv_result = None
+        st.session_state.sv_obs    = None
+
+    if sv_fetch:
+        if end_dt <= start_dt:
+            st.error("End time must be after start time.")
+        else:
+            valid_tags = [t for t in st.session_state.sv_tags if t["db_name"].strip()]
+            if not valid_tags:
+                st.warning("Add at least one tag with a DB Tag Name.")
             else:
-                try:
-                    aliases_list = [a.strip().lower() for a in new_aliases.split(",") if a.strip()]
-                    upsert_component({
-                        "canonical_name": new_name.strip(),
-                        "part_number":    new_part.strip() or None,
-                        "category":       new_cat.strip() or None,
-                        "subsystem":      new_sub.strip() or None,
-                        "aliases":        aliases_list,
-                        "notes":          new_notes.strip() or None,
-                        "active":         True,
-                    })
-                    from extractor import refresh_component_cache
-                    refresh_component_cache()
-                    st.success(f"Component '{new_name}' added.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                with st.spinner("Fetching sensor data…"):
+                    try:
+                        db_names = [t["db_name"].strip() for t in valid_tags]
+                        rows     = fetch_sensor_data(start_dt, end_dt, db_names)
+                        obs      = fetch_observations_in_window(start_dt, end_dt)
+                        st.session_state.sv_result = {"rows": rows, "tags": valid_tags}
+                        st.session_state.sv_obs    = obs
+                    except Exception as e:
+                        st.error(f"Error fetching data: {e}")
+                        st.session_state.sv_result = None
+
+    # ── Chart ─────────────────────────────────────────────────────────────────
+    sv_result = st.session_state.get("sv_result")
+    sv_obs    = st.session_state.get("sv_obs") or []
+
+    if sv_result is not None:
+        rows = sv_result["rows"]
+        tags = sv_result["tags"]
+
+        if not rows:
+            st.info("No sensor data found for the selected tags and time window.", icon="ℹ️")
+        else:
+            df = pd.DataFrame(rows)
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            df["val"]  = pd.to_numeric(df["val"], errors="coerce")
+
+            # Apply scale factors
+            scale_map   = {t["db_name"]: t["scale"]   for t in tags}
+            display_map = {t["db_name"]: t["display"]  for t in tags}
+            df["scaled"] = df.apply(lambda r: r["val"] * scale_map.get(r["tagname"], 1.0), axis=1)
+            df["label"]  = df["tagname"].map(display_map)
+
+            # Pivot to one column per tag
+            pivot = (df.pivot_table(index="time", columns="label", values="scaled", aggfunc="mean")
+                       .reset_index())
+
+            TRACE_COLOURS = ["#c9a84c", "#5a9abf", "#7c6a9a", "#4a9a6a", "#bf5a5a", "#9abf5a"]
+            fig = go.Figure()
+
+            display_cols = [t["display"] for t in tags if t["display"] in pivot.columns]
+            for idx, col in enumerate(display_cols):
+                colour  = TRACE_COLOURS[idx % len(TRACE_COLOURS)]
+                col_df  = pivot[["time", col]].dropna()
+                fig.add_trace(go.Scatter(
+                    x=col_df["time"],
+                    y=col_df[col],
+                    mode="lines",
+                    name=col,
+                    line=dict(color=colour, width=1.5),
+                    hovertemplate=f"<b>{col}</b>  %{{y:.3f}}<extra></extra>",
+                ))
+
+            # Observation overlays
+            if sv_obs:
+                for obs in sv_obs:
+                    fig.add_shape(
+                        type="line",
+                        x0=obs["logged_at"], x1=obs["logged_at"],
+                        y0=0, y1=1,
+                        xref="x", yref="paper",
+                        line=dict(color="#c9a84c", width=1, dash="dot"),
+                    )
+
+                obs_hover = [
+                    (f"<b>[{o.get('severity', '')}]</b> {o.get('engineer', '')}<br>"
+                     f"{(o.get('summary') or o.get('issues_found') or '').replace(chr(10), ' ')[:200]}")
+                    for o in sv_obs
+                ]
+                fig.add_trace(go.Scatter(
+                    x=[o["logged_at"] for o in sv_obs],
+                    y=[0.97] * len(sv_obs),
+                    yaxis="y2",
+                    mode="markers",
+                    name="Observations",
+                    marker=dict(symbol="diamond", size=10, color="#c9a84c",
+                                line=dict(color="#0b0c0e", width=1)),
+                    text=obs_hover,
+                    hovertemplate="<b>Observation</b>  %{x}<br>%{text}<extra></extra>",
+                    hoverlabel=dict(
+                        bgcolor="#111318",
+                        font=dict(family="Share Tech Mono", size=11, color="#c9a84c"),
+                        align="left",
+                    ),
+                ))
+
+            fig.update_layout(
+                plot_bgcolor="#0b0c0e",
+                paper_bgcolor="#0b0c0e",
+                font=dict(family="Share Tech Mono, monospace", color="#c8cdd8", size=11),
+                xaxis=dict(
+                    showgrid=True, gridcolor="#1e2128", gridwidth=1,
+                    tickfont=dict(color="#5a6070", size=10),
+                    title=None,
+                    rangeslider=dict(visible=True, bgcolor="#111318", thickness=0.06),
+                ),
+                yaxis=dict(
+                    showgrid=True, gridcolor="#1e2128", gridwidth=1,
+                    tickfont=dict(color="#c8cdd8", size=10),
+                    title="Value",
+                    titlefont=dict(color="#5a6070"),
+                    zeroline=False,
+                ),
+                yaxis2=dict(
+                    overlaying="y",
+                    range=[0, 1],
+                    visible=False,
+                    fixedrange=True,
+                ),
+                legend=dict(
+                    bgcolor="#111318", bordercolor="#2a2d35", borderwidth=1,
+                    font=dict(color="#c8cdd8", size=10),
+                ),
+                hovermode="x unified",
+                margin=dict(l=20, r=20, t=20, b=80),
+                height=500,
+                hoverlabel=dict(bgcolor="#111318", font=dict(family="Share Tech Mono")),
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.caption(f"{len(rows):,} data points  ·  {len(display_cols)} tag(s)  ·  {len(sv_obs)} observation(s)")
+
+        # ── Observations table ─────────────────────────────────────────────────
+        st.divider()
+        st.subheader("OBSERVATIONS LOG")
+
+        if sv_obs:
+            obs_df = pd.DataFrame([{
+                "Timestamp (UTC)": (o["logged_at"].strftime("%Y-%m-%d %H:%M:%S")
+                                    if hasattr(o["logged_at"], "strftime") else str(o["logged_at"])),
+                "Engineer":        o.get("engineer", ""),
+                "Activity":        o.get("activity_type", ""),
+                "Severity":        o.get("severity", ""),
+                "Summary":         o.get("summary", ""),
+                "Issues Found":    o.get("issues_found", ""),
+                "Maintenance":     o.get("maintenance_done", ""),
+            } for o in sv_obs])
+            st.dataframe(obs_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No observations logged in this time window.", icon="ℹ️")
