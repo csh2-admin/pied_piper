@@ -25,21 +25,20 @@ from config import DB_URI
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS memo_log (
-    id                  BIGSERIAL,
-    logged_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    engineer            TEXT         NOT NULL,
-    source_file         TEXT,
-    summary             TEXT,
-    system_performance  TEXT,
-    maintenance_done    TEXT,
-    issues_found        TEXT,
-    action_items        TEXT,
-    components_affected TEXT,
-    duration_hours      NUMERIC,
-    severity            TEXT,
-    additional_notes    TEXT,
-    raw_transcript      TEXT,
-    raw_insights_json   JSONB,
+    id                        BIGSERIAL,
+    logged_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    engineer                  TEXT         NOT NULL,
+    source_file               TEXT,
+    activity_type             TEXT,
+    summary                   TEXT,
+    system_performance        TEXT,
+    action_items              TEXT,
+    components_affected       TEXT,
+    duration_hours            NUMERIC,
+    additional_notes          TEXT,
+    trigger_simulation_update BOOLEAN      NOT NULL DEFAULT FALSE,
+    raw_transcript            TEXT,
+    raw_insights_json         JSONB,
     PRIMARY KEY (id, logged_at)
 );
 """
@@ -62,15 +61,15 @@ $$;
 INSERT_SQL = """
 INSERT INTO memo_log (
     engineer, source_file, activity_type,
-    summary, system_performance, maintenance_done,
-    issues_found, action_items, components_affected,
-    duration_hours, severity, additional_notes,
+    summary, system_performance, action_items,
+    components_affected, duration_hours,
+    additional_notes, trigger_simulation_update,
     raw_transcript, raw_insights_json
 ) VALUES (
     %(engineer)s, %(source_file)s, %(activity_type)s,
-    %(summary)s, %(system_performance)s, %(maintenance_done)s,
-    %(issues_found)s, %(action_items)s, %(components_affected)s,
-    %(duration_hours)s, %(severity)s, %(additional_notes)s,
+    %(summary)s, %(system_performance)s, %(action_items)s,
+    %(components_affected)s, %(duration_hours)s,
+    %(additional_notes)s, %(trigger_simulation_update)s,
     %(raw_transcript)s, %(raw_insights_json)s
 )
 RETURNING id, logged_at;
@@ -78,18 +77,16 @@ RETURNING id, logged_at;
 
 UPDATE_SQL = """
 UPDATE memo_log SET
-    engineer            = %(engineer)s,
-    activity_type       = %(activity_type)s,
-    summary             = %(summary)s,
-    system_performance  = %(system_performance)s,
-    maintenance_done    = %(maintenance_done)s,
-    issues_found        = %(issues_found)s,
-    action_items        = %(action_items)s,
-    components_affected = %(components_affected)s,
-    duration_hours      = %(duration_hours)s,
-    severity            = %(severity)s,
-    additional_notes    = %(additional_notes)s,
-    raw_transcript      = %(raw_transcript)s
+    engineer                  = %(engineer)s,
+    activity_type             = %(activity_type)s,
+    summary                   = %(summary)s,
+    system_performance        = %(system_performance)s,
+    action_items              = %(action_items)s,
+    components_affected       = %(components_affected)s,
+    duration_hours            = %(duration_hours)s,
+    additional_notes          = %(additional_notes)s,
+    trigger_simulation_update = %(trigger_simulation_update)s,
+    raw_transcript            = %(raw_transcript)s
 WHERE id = %(id)s
 RETURNING id, logged_at;
 """
@@ -97,9 +94,9 @@ RETURNING id, logged_at;
 FETCH_ALL_SQL = """
 SELECT
     id, logged_at, engineer, source_file, activity_type,
-    summary, system_performance, maintenance_done,
-    issues_found, action_items, components_affected,
-    duration_hours, severity, additional_notes, raw_transcript
+    summary, system_performance, action_items,
+    components_affected, duration_hours,
+    additional_notes, trigger_simulation_update, raw_transcript
 FROM memo_log
 ORDER BY logged_at DESC;
 """
@@ -107,19 +104,19 @@ ORDER BY logged_at DESC;
 FETCH_FILTERED_SQL = """
 SELECT
     id, logged_at, engineer, source_file, activity_type,
-    summary, system_performance, maintenance_done,
-    issues_found, action_items, components_affected,
-    duration_hours, severity, additional_notes, raw_transcript
+    summary, system_performance, action_items,
+    components_affected, duration_hours,
+    additional_notes, trigger_simulation_update, raw_transcript
 FROM memo_log
 WHERE
     (%(engineer)s      = '' OR engineer      = %(engineer)s)
     AND (%(activity_type)s = '' OR activity_type = %(activity_type)s)
-    AND (%(severity)s   = '' OR severity   = %(severity)s)
     AND (%(search)s     = '' OR
          summary             ILIKE %(search_like)s OR
-         issues_found        ILIKE %(search_like)s OR
-         maintenance_done    ILIKE %(search_like)s OR
+         system_performance  ILIKE %(search_like)s OR
+         action_items        ILIKE %(search_like)s OR
          components_affected ILIKE %(search_like)s OR
+         additional_notes    ILIKE %(search_like)s OR
          raw_transcript      ILIKE %(search_like)s)
     AND (%(date_from)s  = '' OR logged_at::date >= %(date_from)s::date)
     AND (%(date_to)s    = '' OR logged_at::date <= %(date_to)s::date)
@@ -241,21 +238,19 @@ def append_entry(insights: dict, raw_transcript: str,
                  source_file: str, engineer: str,
                  logged_at=None) -> dict:
     row = {
-        "engineer":            engineer,
-        "source_file":         source_file,
-        "activity_type":       insights.get("activity_type", ""),
-        "summary":             insights.get("summary", ""),
-        "system_performance":  insights.get("system_performance", ""),
-        "maintenance_done":    insights.get("maintenance_done", ""),
-        "issues_found":        insights.get("issues_found", ""),
-        "action_items":        insights.get("action_items", ""),
-        "components_affected": insights.get("components_affected", ""),
-        "duration_hours":      _parse_duration(insights.get("duration_hours")),
-        "severity":            insights.get("severity", ""),
-        "additional_notes":    insights.get("additional_notes", ""),
-        "raw_transcript":      raw_transcript,
-        "raw_insights_json":   json.dumps(insights),
-        "logged_at":           logged_at,  # None → COALESCE to NOW()
+        "engineer":                  engineer,
+        "source_file":               source_file,
+        "activity_type":             insights.get("activity_type", ""),
+        "summary":                   insights.get("summary", ""),
+        "system_performance":        insights.get("system_performance", ""),
+        "action_items":              insights.get("action_items", ""),
+        "components_affected":       insights.get("components_affected", ""),
+        "duration_hours":            _parse_duration(insights.get("duration_hours")),
+        "additional_notes":          insights.get("additional_notes", ""),
+        "trigger_simulation_update": bool(insights.get("trigger_simulation_update", False)),
+        "raw_transcript":            raw_transcript,
+        "raw_insights_json":         json.dumps(insights),
+        "logged_at":                 logged_at,  # None → COALESCE to NOW()
     }
     conn = _connect()
     try:
@@ -274,19 +269,17 @@ def update_entry(row_id: int, fields: dict) -> dict:
     Returns {'id': ..., 'logged_at': ...}.
     """
     params = {
-        "id":                  row_id,
-        "engineer":            fields.get("engineer", ""),
-        "activity_type":       fields.get("activity_type", ""),
-        "summary":             fields.get("summary", ""),
-        "system_performance":  fields.get("system_performance", ""),
-        "maintenance_done":    fields.get("maintenance_done", ""),
-        "issues_found":        fields.get("issues_found", ""),
-        "action_items":        fields.get("action_items", ""),
-        "components_affected": fields.get("components_affected", ""),
-        "duration_hours":      _parse_duration(fields.get("duration_hours")),
-        "severity":            fields.get("severity", ""),
-        "additional_notes":    fields.get("additional_notes", ""),
-        "raw_transcript":      fields.get("raw_transcript", ""),
+        "id":                        row_id,
+        "engineer":                  fields.get("engineer", ""),
+        "activity_type":             fields.get("activity_type", ""),
+        "summary":                   fields.get("summary", ""),
+        "system_performance":        fields.get("system_performance", ""),
+        "action_items":              fields.get("action_items", ""),
+        "components_affected":       fields.get("components_affected", ""),
+        "duration_hours":            _parse_duration(fields.get("duration_hours")),
+        "additional_notes":          fields.get("additional_notes", ""),
+        "trigger_simulation_update": bool(fields.get("trigger_simulation_update", False)),
+        "raw_transcript":            fields.get("raw_transcript", ""),
     }
     conn = _connect()
     try:
@@ -321,12 +314,11 @@ def fetch_all_rows() -> list[dict]:
         conn.close()
 
 
-def fetch_filtered_rows(engineer="", activity_type="", severity="",
+def fetch_filtered_rows(engineer="", activity_type="",
                         search="", date_from="", date_to="") -> list[dict]:
     params = {
         "engineer":      engineer,
         "activity_type": activity_type,
-        "severity":      severity,
         "search":        search,
         "search_like":   f"%{search}%",
         "date_from":     date_from,
@@ -467,21 +459,19 @@ DB_SCHEMA = """
 You have access to two PostgreSQL (TimescaleDB) tables:
 
 TABLE: memo_log
-  id                  BIGINT          -- unique row ID
-  logged_at           TIMESTAMPTZ     -- when the entry was saved (UTC)
-  engineer            TEXT            -- who logged it (e.g. 'PJ Callahan')
-  source_file         TEXT            -- audio filename or 'Live Recording'
-  activity_type       TEXT            -- 'Regular Maintenance' | 'Unplanned Maintenance' | 'Technical Milestone' | 'Logistics' | 'Other'
-  summary             TEXT            -- 1-2 sentence summary of the entry
-  system_performance  TEXT            -- observations about system behaviour
-  maintenance_done    TEXT            -- maintenance activities completed
-  issues_found        TEXT            -- problems or unexpected behaviours
-  action_items        TEXT            -- follow-up tasks
-  components_affected TEXT            -- parts or subsystems mentioned
-  duration_hours      NUMERIC         -- time spent (may be NULL)
-  severity            TEXT            -- 'Critical' | 'High' | 'Medium' | 'Low' | 'None'
-  additional_notes    TEXT
-  raw_transcript      TEXT            -- full verbatim transcript
+  id                        BIGINT          -- unique row ID
+  logged_at                 TIMESTAMPTZ     -- when the entry was saved (UTC)
+  engineer                  TEXT            -- who logged it (e.g. 'PJ Callahan')
+  source_file               TEXT            -- audio filename or 'Live Recording'
+  activity_type             TEXT            -- 'Action Item' | 'Qualitative Observation' | 'System Maintenance' | 'Performance - Quantitative' | 'Hypothesis' | 'Other'
+  summary                   TEXT            -- 1-2 sentence summary of the entry
+  system_performance        TEXT            -- narrative observations about system behaviour
+  action_items              TEXT            -- follow-up tasks
+  components_affected       TEXT            -- parts or subsystems mentioned
+  duration_hours            NUMERIC         -- time spent (may be NULL)
+  additional_notes          TEXT
+  trigger_simulation_update BOOLEAN         -- true if this entry should trigger a simulation parameter update
+  raw_transcript            TEXT            -- full verbatim transcript
 
 TABLE: action_items
   id           BIGINT
@@ -661,63 +651,3 @@ def bulk_insert_gantt_tasks(task_list: list[dict]) -> list[dict]:
     return created
 
 
-# ── Sensor / Process Data ─────────────────────────────────────────────────────
-
-def fetch_sensor_data(start_time, end_time, tag_names: list) -> list:
-    """
-    Fetch process tag data using adaptive resolution based on window size.
-      > 4 hr    → procdatafloattable_utc_15sec
-      31min–4hr → procdatafloattable_utc_1sec
-      < 31 min  → procdatafloattable (raw)
-
-    Joins with procdatatagtable on tagindex.
-    Returns list of dicts: {time, tagname, val}.
-    """
-    from datetime import timedelta
-
-    if not tag_names:
-        return []
-
-    duration = end_time - start_time
-    if duration > timedelta(hours=4):
-        table = "procdatafloattable_utc_15sec"
-    elif duration >= timedelta(minutes=31):
-        table = "procdatafloattable_utc_1sec"
-    else:
-        table = "procdatafloattable"
-
-    placeholders = ",".join(["%s"] * len(tag_names))
-    sql = f"""
-        SELECT p.utc_full_timestamp AS time, t.tagname, p.val
-        FROM {table} p
-        JOIN procdatatagtable t ON p.tagindex = t.tagindex
-        WHERE t.tagname IN ({placeholders})
-          AND p.utc_full_timestamp >= %s
-          AND p.utc_full_timestamp < %s
-        ORDER BY p.utc_full_timestamp
-    """
-    conn = _connect()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, list(tag_names) + [start_time, end_time])
-            return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-def fetch_observations_in_window(start_time, end_time) -> list:
-    """Return memo_log entries whose logged_at falls within [start_time, end_time)."""
-    sql = """
-        SELECT id, logged_at, engineer, activity_type, summary,
-               severity, issues_found, maintenance_done
-        FROM memo_log
-        WHERE logged_at >= %(start_time)s AND logged_at < %(end_time)s
-        ORDER BY logged_at
-    """
-    conn = _connect()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"start_time": start_time, "end_time": end_time})
-            return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()

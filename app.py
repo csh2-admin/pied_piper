@@ -270,21 +270,26 @@ code, pre {
 """, unsafe_allow_html=True)
 
 
-SEV_BADGE = {
-    "Critical": "🔴", "High": "🟠",
-    "Medium":   "🟡", "Low":  "🟢", "None": "⚪",
-}
-SEVERITY_OPTIONS = ["Critical", "High", "Medium", "Low", "None"]
 STATUS_OPTIONS   = ["Not Started", "In Progress", "Complete"]
 STATUS_BADGE     = {"Not Started": "⬜", "In Progress": "🔵", "Complete": "✅"}
 
 ACTIVITY_OPTIONS = [
-    "Regular Maintenance",
-    "Unplanned Maintenance",
-    "Technical Milestone",
-    "Logistics",
+    "Action Item",
+    "Qualitative Observation",
+    "System Maintenance",
+    "Performance - Quantitative",
+    "Hypothesis",
     "Other",
 ]
+
+ACTIVITY_BADGE = {
+    "Action Item":                "📋",
+    "Qualitative Observation":    "👁",
+    "System Maintenance":         "🔧",
+    "Performance - Quantitative": "📊",
+    "Hypothesis":                 "💡",
+    "Other":                      "•",
+}
 
 # ── Pinocchio loading animation (Ask Weebo) ───────────────────────────────────
 PINOCCHIO_HTML = """
@@ -374,12 +379,11 @@ for k, v in {
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60, show_spinner="Loading records…")
-def _load_records(eng, act, sev, search, d_from, d_to):
+def _load_records(eng, act, search, d_from, d_to):
     from db_logger import fetch_filtered_rows
     return fetch_filtered_rows(
         engineer      = "" if eng == "All engineers"  else eng,
         activity_type = "" if act == "All types"      else act,
-        severity      = "" if sev == "All severities" else sev,
         search        = search or "",
         date_from     = str(d_from) if d_from else "",
         date_to       = str(d_to)   if d_to   else "",
@@ -428,20 +432,20 @@ def _edit_row(row: dict):
             eng_idx = TEAM_MEMBERS.index(cur_eng) if cur_eng in TEAM_MEMBERS else 0
             f_eng   = st.selectbox("Engineer", TEAM_MEMBERS, index=eng_idx)
             cur_act2 = row.get("activity_type","Other") or "Other"
-            act_idx2 = ACTIVITY_OPTIONS.index(cur_act2) if cur_act2 in ACTIVITY_OPTIONS else 4
+            act_idx2 = ACTIVITY_OPTIONS.index(cur_act2) if cur_act2 in ACTIVITY_OPTIONS else len(ACTIVITY_OPTIONS) - 1
             f_act2  = st.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx2)
             f_sum   = st.text_area("Summary",            value=row.get("summary","") or "",            height=75)
             f_sp    = st.text_area("System Performance", value=row.get("system_performance","") or "", height=75)
-            f_md    = st.text_area("Maintenance Done",   value=row.get("maintenance_done","") or "",   height=75)
-            f_if    = st.text_area("Issues Found",       value=row.get("issues_found","") or "",       height=75)
 
         with c2:
             f_ai  = st.text_area("Action Items",        value=row.get("action_items","") or "",        height=75)
             f_ca  = st.text_input("Components Affected", value=row.get("components_affected","") or "")
             f_dur = st.text_input("Duration (hrs)",      value=str(row.get("duration_hours","") or ""))
-            cur_sev = row.get("severity","None") or "None"
-            sev_idx = SEVERITY_OPTIONS.index(cur_sev) if cur_sev in SEVERITY_OPTIONS else 4
-            f_sev = st.selectbox("Severity", SEVERITY_OPTIONS, index=sev_idx)
+            f_tsu = st.checkbox(
+                "Trigger simulation update",
+                value=bool(row.get("trigger_simulation_update", False)),
+                key=f"tsu_{row_id}",
+            )
             f_an  = st.text_area("Additional Notes",    value=row.get("additional_notes","") or "",    height=75)
 
         f_rt = st.text_area("Raw Transcript", value=row.get("raw_transcript","") or "", height=100)
@@ -455,10 +459,10 @@ def _edit_row(row: dict):
             from db_logger import update_entry
             update_entry(row_id, {
                 "engineer": f_eng, "activity_type": f_act2, "summary": f_sum,
-                "system_performance": f_sp, "maintenance_done": f_md,
-                "issues_found": f_if, "action_items": f_ai,
+                "system_performance": f_sp, "action_items": f_ai,
                 "components_affected": f_ca, "duration_hours": f_dur,
-                "severity": f_sev, "additional_notes": f_an,
+                "additional_notes": f_an,
+                "trigger_simulation_update": f_tsu,
                 "raw_transcript": f_rt,
             })
             st.success(f"Record {row_id} updated.")
@@ -488,7 +492,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["New Entry", "Records", "Actions", "Gantt", "Sensor View", "Ask Weebo"],
+        ["New Entry", "Records", "Actions", "Gantt", "Ask Weebo"],
         label_visibility="collapsed",
     )
 
@@ -600,31 +604,31 @@ if page == "New Entry":
             with st.form("edit_insights_form"):
                 st.markdown("##### Review extracted fields — edit anything before saving")
 
-                # Row 1: Activity type + Severity side by side (dropdowns)
+                # Row 1: Activity type + Trigger simulation update checkbox
                 r1c1, r1c2 = st.columns(2)
                 cur_act = ins.get("activity_type","Other") or "Other"
-                act_idx = ACTIVITY_OPTIONS.index(cur_act) if cur_act in ACTIVITY_OPTIONS else 4
+                act_idx = ACTIVITY_OPTIONS.index(cur_act) if cur_act in ACTIVITY_OPTIONS else len(ACTIVITY_OPTIONS) - 1
                 f_activity = r1c1.selectbox("Activity Type", ACTIVITY_OPTIONS, index=act_idx)
 
-                cur_sev = ins.get("severity","None") or "None"
-                sev_idx = SEVERITY_OPTIONS.index(cur_sev) if cur_sev in SEVERITY_OPTIONS else 4
-                f_severity = r1c2.selectbox("Severity", SEVERITY_OPTIONS, index=sev_idx)
+                with r1c2:
+                    st.write("")
+                    f_trigger_sim = st.checkbox(
+                        "Trigger simulation update",
+                        value=bool(ins.get("trigger_simulation_update", False)),
+                        help="Whether this entry should trigger a downstream simulation parameter update.",
+                    )
 
                 # Summary — full width
                 f_summary = st.text_area("Summary",
                     value=ins.get("summary","") or "", height=75)
 
-                # Row 2: two-column text areas
+                # Row 2: two-column layout
                 c1, c2 = st.columns(2)
                 f_sp   = c1.text_area("System Performance",
                     value=ins.get("system_performance","") or "", height=100)
-                f_md   = c1.text_area("Maintenance Done",
-                    value=ins.get("maintenance_done","") or "", height=100)
-                f_if   = c1.text_area("Issues Found",
-                    value=ins.get("issues_found","") or "", height=100)
                 f_ai   = c2.text_area("Action Items",
                     value=ins.get("action_items","") or "", height=100)
-                f_ca   = c2.text_input("Components Affected",
+                f_ca   = c1.text_input("Components Affected",
                     value=ins.get("components_affected","") or "")
                 f_dur  = c2.text_input("Duration (hrs)",
                     value=str(ins.get("duration_hours","") or ""))
@@ -650,16 +654,14 @@ if page == "New Entry":
             if do_save:
                 # Write edited values back to session state before saving
                 edited = {
-                    "activity_type":       f_activity,
-                    "summary":             f_summary,
-                    "system_performance":  f_sp,
-                    "maintenance_done":    f_md,
-                    "issues_found":        f_if,
-                    "action_items":        f_ai,
-                    "components_affected": f_ca,
-                    "duration_hours":      f_dur,
-                    "severity":            f_severity,
-                    "additional_notes":    f_an,
+                    "activity_type":             f_activity,
+                    "summary":                   f_summary,
+                    "system_performance":        f_sp,
+                    "action_items":              f_ai,
+                    "components_affected":       f_ca,
+                    "duration_hours":            f_dur,
+                    "additional_notes":          f_an,
+                    "trigger_simulation_update": f_trigger_sim,
                 }
                 with st.spinner("Saving…"):
                     try:
@@ -703,12 +705,11 @@ elif page == "Records":
     # ── Filters ───────────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("FILTERS")
-        fc1, fc2, fc3, fc4 = st.columns(4)
+        fc1, fc2, fc3 = st.columns(3)
         f_eng  = fc1.selectbox("Engineer", ["All engineers"] + TEAM_MEMBERS)
         f_act  = fc2.selectbox("Activity Type", ["All types"] + ACTIVITY_OPTIONS)
-        f_sev  = fc3.selectbox("Severity",  ["All severities"] + SEVERITY_OPTIONS)
-        f_srch = fc4.text_input("Keyword search",
-                                placeholder="summary, issues, components…")
+        f_srch = fc3.text_input("Keyword search",
+                                placeholder="summary, components, notes…")
 
         fd1, fd2, fd3 = st.columns(3)
         f_from = fd1.date_input("From", value=None)
@@ -728,7 +729,7 @@ elif page == "Records":
 
     # ── Fetch ─────────────────────────────────────────────────────────────────
     try:
-        rows = _load_records(f_eng, f_act, f_sev, f_srch, f_from, f_to)
+        rows = _load_records(f_eng, f_act, f_srch, f_from, f_to)
     except Exception as e:
         st.error(f"Could not load records: {e}")
         rows = []
@@ -763,13 +764,13 @@ elif page == "Records":
         for row in rows:
             ts    = row.get("logged_at")
             ts_str= ts.strftime("%Y-%m-%d  %H:%M UTC") if hasattr(ts,"strftime") else str(ts)
-            sev   = row.get("severity","") or ""
-            badge = SEV_BADGE.get(sev,"⚪")
-            summary_preview = (row.get("summary") or "")[:90]
-
             act_label = row.get("activity_type","") or ""
+            badge = ACTIVITY_BADGE.get(act_label, "•")
+            summary_preview = (row.get("summary") or "")[:90]
+            sim_flag = "  ·  🔄 sim" if row.get("trigger_simulation_update") else ""
+
             with st.expander(
-                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}  ·  {summary_preview}"
+                f"{badge}  **{ts_str}**  ·  {row.get('engineer','')}  ·  {act_label}{sim_flag}  ·  {summary_preview}"
             ):
                 _edit_row(row)
 
@@ -986,11 +987,11 @@ elif page == "Ask Weebo":
         examples = [
             "What day did we first observe oscillations?",
             "Summarise all records where we received a hydrogen delivery",
-            "Which engineer has logged the most Critical or High severity entries?",
-            "List all unplanned maintenance events in the last 30 days",
+            "List all hypotheses logged in the last 30 days",
+            "Which entries are flagged to trigger a simulation update?",
             "What action items are overdue?",
             "Show me every entry that mentions the pressure sensor",
-            "How many hours of maintenance did we log in total?",
+            "How many hours of system maintenance did we log in total?",
             "What were the most common components affected across all entries?",
         ]
         cols = st.columns(2)
@@ -1058,7 +1059,7 @@ Rules:
 - Use only SELECT statements. Never use INSERT, UPDATE, DELETE, DROP, etc.
 - Use ILIKE for case-insensitive text search.
 - Dates are stored as TIMESTAMPTZ in UTC. Use NOW() for current time.
-- When searching free-text fields (summary, raw_transcript, issues_found, etc.), 
+- When searching free-text fields (summary, raw_transcript, system_performance, action_items, additional_notes, etc.),
   search across all relevant text columns using OR.
 - Limit results to 200 rows maximum unless the question asks for aggregates.
 - For "recent" without a specific timeframe, use the last 90 days.
@@ -1591,233 +1592,3 @@ Return only the JSON array of task objects."""
                             st.error(f"Error: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE: SENSOR VIEW
-# ─────────────────────────────────────────────────────────────────────────────
-elif page == "Sensor View":
-    import pandas as pd
-    import plotly.graph_objects as go
-    from datetime import datetime, timedelta, timezone
-    from db_logger import fetch_sensor_data, fetch_observations_in_window
-
-    st.header("SENSOR VIEW")
-    st.caption("Process tag data with qualitative observation overlays from voice memos.")
-
-    # ── Time window ───────────────────────────────────────────────────────────
-    now_utc = datetime.now(timezone.utc)
-    default_start = now_utc - timedelta(hours=4)
-
-    with st.container(border=True):
-        st.subheader("TIME WINDOW  (UTC)")
-        tc1, tc2, tc3, tc4 = st.columns(4)
-        sv_sd = tc1.date_input("Start Date", value=default_start.date(), key="sv_sd")
-        sv_st = tc2.time_input("Start Time", value=default_start.replace(second=0, microsecond=0).time(), key="sv_st")
-        sv_ed = tc3.date_input("End Date",   value=now_utc.date(), key="sv_ed")
-        sv_et = tc4.time_input("End Time",   value=now_utc.replace(second=0, microsecond=0).time(), key="sv_et")
-
-    start_dt = datetime(sv_sd.year, sv_sd.month, sv_sd.day,
-                        sv_st.hour, sv_st.minute, tzinfo=timezone.utc)
-    end_dt   = datetime(sv_ed.year, sv_ed.month, sv_ed.day,
-                        sv_et.hour, sv_et.minute, tzinfo=timezone.utc)
-
-    duration = end_dt - start_dt
-    if duration.total_seconds() > 0:
-        if duration > timedelta(hours=4):
-            res_label = "15-sec aggregates"
-        elif duration >= timedelta(minutes=31):
-            res_label = "1-sec aggregates"
-        else:
-            res_label = "raw data"
-        st.caption(f"Window: {duration}  ·  Resolution: {res_label}")
-
-    # ── Tag configuration ─────────────────────────────────────────────────────
-    if "sv_tags" not in st.session_state:
-        st.session_state.sv_tags = [
-            {"db_name": "M130_RefFreq", "display": "MC130_SP",  "scale": round(5.0 / 3, 4)},
-            {"db_name": "AO_AOV140",    "display": "AOV140_SP", "scale": 1.0},
-        ]
-
-    with st.container(border=True):
-        st.subheader("TAGS")
-        st.caption("DB Tag Name  ·  Display Label  ·  Scale Factor")
-
-        # Column headers
-        hc1, hc2, hc3, hc4 = st.columns([3, 3, 2, 1])
-        hc1.markdown("**DB Tag Name**")
-        hc2.markdown("**Display Label**")
-        hc3.markdown("**Scale Factor**")
-
-        tags_to_remove = []
-        for i, tag in enumerate(st.session_state.sv_tags):
-            rc1, rc2, rc3, rc4 = st.columns([3, 3, 2, 1])
-            new_db    = rc1.text_input("db",    value=tag["db_name"], key=f"sv_db_{i}",    label_visibility="collapsed")
-            new_disp  = rc2.text_input("disp",  value=tag["display"],  key=f"sv_disp_{i}",  label_visibility="collapsed")
-            new_scale = rc3.number_input("scale", value=float(tag["scale"]), key=f"sv_scale_{i}",
-                                         step=0.0001, format="%.4f", label_visibility="collapsed")
-            if rc4.button("✕", key=f"sv_rm_{i}", use_container_width=True):
-                tags_to_remove.append(i)
-            st.session_state.sv_tags[i] = {"db_name": new_db, "display": new_disp, "scale": new_scale}
-
-        for idx in sorted(tags_to_remove, reverse=True):
-            st.session_state.sv_tags.pop(idx)
-            st.rerun()
-
-        if st.button("＋  Add Tag", key="sv_add"):
-            st.session_state.sv_tags.append({"db_name": "", "display": "", "scale": 1.0})
-            st.rerun()
-
-    # ── Fetch button ──────────────────────────────────────────────────────────
-    sv_fetch = st.button("FETCH DATA", type="primary", key="sv_fetch")
-
-    if "sv_result" not in st.session_state:
-        st.session_state.sv_result = None
-        st.session_state.sv_obs    = None
-
-    if sv_fetch:
-        if end_dt <= start_dt:
-            st.error("End time must be after start time.")
-        else:
-            valid_tags = [t for t in st.session_state.sv_tags if t["db_name"].strip()]
-            if not valid_tags:
-                st.warning("Add at least one tag with a DB Tag Name.")
-            else:
-                with st.spinner("Fetching sensor data…"):
-                    try:
-                        db_names = [t["db_name"].strip() for t in valid_tags]
-                        rows     = fetch_sensor_data(start_dt, end_dt, db_names)
-                        obs      = fetch_observations_in_window(start_dt, end_dt)
-                        st.session_state.sv_result = {"rows": rows, "tags": valid_tags}
-                        st.session_state.sv_obs    = obs
-                    except Exception as e:
-                        st.error(f"Error fetching data: {e}")
-                        st.session_state.sv_result = None
-
-    # ── Chart ─────────────────────────────────────────────────────────────────
-    sv_result = st.session_state.get("sv_result")
-    sv_obs    = st.session_state.get("sv_obs") or []
-
-    if sv_result is not None:
-        rows = sv_result["rows"]
-        tags = sv_result["tags"]
-
-        if not rows:
-            st.info("No sensor data found for the selected tags and time window.", icon="ℹ️")
-        else:
-            df = pd.DataFrame(rows)
-            df["time"] = pd.to_datetime(df["time"], utc=True)
-            df["val"]  = pd.to_numeric(df["val"], errors="coerce")
-
-            # Apply scale factors
-            scale_map   = {t["db_name"]: t["scale"]   for t in tags}
-            display_map = {t["db_name"]: t["display"]  for t in tags}
-            df["scaled"] = df.apply(lambda r: r["val"] * scale_map.get(r["tagname"], 1.0), axis=1)
-            df["label"]  = df["tagname"].map(display_map)
-
-            # Pivot to one column per tag
-            pivot = (df.pivot_table(index="time", columns="label", values="scaled", aggfunc="mean")
-                       .reset_index())
-
-            TRACE_COLOURS = ["#c9a84c", "#5a9abf", "#7c6a9a", "#4a9a6a", "#bf5a5a", "#9abf5a"]
-            fig = go.Figure()
-
-            display_cols = [t["display"] for t in tags if t["display"] in pivot.columns]
-            for idx, col in enumerate(display_cols):
-                colour  = TRACE_COLOURS[idx % len(TRACE_COLOURS)]
-                col_df  = pivot[["time", col]].dropna()
-                fig.add_trace(go.Scatter(
-                    x=col_df["time"],
-                    y=col_df[col],
-                    mode="lines",
-                    name=col,
-                    line=dict(color=colour, width=1.5),
-                    hovertemplate=f"<b>{col}</b>  %{{y:.3f}}<extra></extra>",
-                ))
-
-            # Observation overlays
-            if sv_obs:
-                for obs in sv_obs:
-                    fig.add_shape(
-                        type="line",
-                        x0=obs["logged_at"], x1=obs["logged_at"],
-                        y0=0, y1=1,
-                        xref="x", yref="paper",
-                        line=dict(color="#c9a84c", width=1, dash="dot"),
-                    )
-
-                obs_hover = [
-                    (f"<b>[{o.get('severity', '')}]</b> {o.get('engineer', '')}<br>"
-                     f"{(o.get('summary') or o.get('issues_found') or '').replace(chr(10), ' ')[:200]}")
-                    for o in sv_obs
-                ]
-                fig.add_trace(go.Scatter(
-                    x=[o["logged_at"] for o in sv_obs],
-                    y=[0.97] * len(sv_obs),
-                    yaxis="y2",
-                    mode="markers",
-                    name="Observations",
-                    marker=dict(symbol="diamond", size=10, color="#c9a84c",
-                                line=dict(color="#0b0c0e", width=1)),
-                    text=obs_hover,
-                    hovertemplate="<b>Observation</b>  %{x}<br>%{text}<extra></extra>",
-                    hoverlabel=dict(
-                        bgcolor="#111318",
-                        font=dict(family="Share Tech Mono", size=11, color="#c9a84c"),
-                        align="left",
-                    ),
-                ))
-
-            fig.update_layout(
-                plot_bgcolor="#0b0c0e",
-                paper_bgcolor="#0b0c0e",
-                font=dict(family="Share Tech Mono, monospace", color="#c8cdd8", size=11),
-                xaxis=dict(
-                    showgrid=True, gridcolor="#1e2128", gridwidth=1,
-                    tickfont=dict(color="#5a6070", size=10),
-                    title=None,
-                    rangeslider=dict(visible=True, bgcolor="#111318", thickness=0.06),
-                ),
-                yaxis=dict(
-                    showgrid=True, gridcolor="#1e2128", gridwidth=1,
-                    tickfont=dict(color="#c8cdd8", size=10),
-                    title="Value",
-                    titlefont=dict(color="#5a6070"),
-                    zeroline=False,
-                ),
-                yaxis2=dict(
-                    overlaying="y",
-                    range=[0, 1],
-                    visible=False,
-                    fixedrange=True,
-                ),
-                legend=dict(
-                    bgcolor="#111318", bordercolor="#2a2d35", borderwidth=1,
-                    font=dict(color="#c8cdd8", size=10),
-                ),
-                hovermode="x unified",
-                margin=dict(l=20, r=20, t=20, b=80),
-                height=500,
-                hoverlabel=dict(bgcolor="#111318", font=dict(family="Share Tech Mono")),
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.caption(f"{len(rows):,} data points  ·  {len(display_cols)} tag(s)  ·  {len(sv_obs)} observation(s)")
-
-        # ── Observations table ─────────────────────────────────────────────────
-        st.divider()
-        st.subheader("OBSERVATIONS LOG")
-
-        if sv_obs:
-            obs_df = pd.DataFrame([{
-                "Timestamp (UTC)": (o["logged_at"].strftime("%Y-%m-%d %H:%M:%S")
-                                    if hasattr(o["logged_at"], "strftime") else str(o["logged_at"])),
-                "Engineer":        o.get("engineer", ""),
-                "Activity":        o.get("activity_type", ""),
-                "Severity":        o.get("severity", ""),
-                "Summary":         o.get("summary", ""),
-                "Issues Found":    o.get("issues_found", ""),
-                "Maintenance":     o.get("maintenance_done", ""),
-            } for o in sv_obs])
-            st.dataframe(obs_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No observations logged in this time window.", icon="ℹ️")
